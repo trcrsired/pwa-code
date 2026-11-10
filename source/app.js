@@ -175,7 +175,7 @@ function updateStatus() {
   if (state.engineReady) {
     $("statusEncoding").textContent = ENCODINGS[state.engine.encoding] || "UTF-8";
   }
-  $("statusWasm").textContent = state.engineReady ? "wasm" : "engineâ€¦";
+  $("statusWasm").textContent = state.engineReady ? "wasm" : "engine…";
   $("docName").textContent = state.path || "untitled";
   updateGutterCursor(line);
 }
@@ -378,13 +378,13 @@ function renderMountBar() {
     const chip = document.createElement("span");
     chip.className = "mount-chip";
     chip.classList.toggle("active", mount.id === state.volumes.mount);
-    chip.title = mount.detail ? `${mount.label} â€” ${mount.detail}` : mount.label;
+    chip.title = mount.detail ? `${mount.label} — ${mount.detail}` : mount.label;
     const name = document.createElement("span");
     name.className = "mount-name";
     name.textContent = mount.label;
     const off = document.createElement("span");
     off.className = "mount-x";
-    off.textContent = "Ã—";
+    off.textContent = "×";
     off.setAttribute("role", "button");
     off.title = "Unmount";
     off.addEventListener("click", (event) => {
@@ -488,7 +488,7 @@ async function openPath(path) {
     $("hexWrap").hidden = true;
     $("editorWrap").hidden = false;
     $("docName").textContent = path;
-    toast(`${path} â€¢ ${info.encodingName}${info.sourceCrlf ? " â€¢ CRLF" : ""}`);
+    toast(`${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}`);
     renderWindow();
     $("editor").focus();
   } catch (error) {
@@ -518,7 +518,7 @@ async function refreshFiles() {
     return;
   }
   $("volStatus").textContent =
-    `${volume.label} â€¢ ${volume.kind}${volume.readOnly ? " â€¢ read-only" : ""}`;
+    `${volume.label} • ${volume.kind}${volume.readOnly ? " • read-only" : ""}`;
   try {
     const entries = await volume.list(state.volumes.path);
     if (!entries.length) {
@@ -536,7 +536,7 @@ async function refreshFiles() {
       row.dataset.dir = entry.dir ? "1" : "0";
       const icon = document.createElement("span");
       icon.className = "ficon";
-      icon.textContent = entry.dir ? "â–¸" : "Â·";
+      icon.textContent = entry.dir ? "▸" : "·";
       const name = document.createElement("span");
       name.className = "fname";
       name.textContent = entry.name;
@@ -545,7 +545,7 @@ async function refreshFiles() {
         const del = document.createElement("button");
         del.className = "fdel";
         del.title = entry.dir ? "Remove folder" : "Remove file";
-        del.textContent = "Ã—";
+        del.textContent = "×";
         del.addEventListener("click", (event) => {
           event.stopPropagation();
           removeEntry(entry);
@@ -553,7 +553,6 @@ async function refreshFiles() {
         row.appendChild(del);
       }
       row.addEventListener("click", () => {
-        if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
         if (entry.dir) {
           state.volumes.path = state.volumes.path
             ? `${state.volumes.path}/${entry.name}`
@@ -644,7 +643,7 @@ async function saveDocument(saveAs = false) {
     await state.volumes.get(state.volume).write(state.path, bytes);
     updateDirty(false);
     $("docName").textContent = state.path;
-    toast(`saved ${state.path} â€¢ ${formatBytes(bytes.length)}`);
+    toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
     fail("save", error);
@@ -693,7 +692,7 @@ async function openFromFileInput(file) {
     state.settings.eol = 0;
     $("statusEol").textContent = EOL_LABELS[0];
     updateDirty(true);
-    toast(`${file.name} â€¢ ${info.encodingName} â€¢ unsaved buffer`);
+    toast(`${file.name} • ${info.encodingName} • unsaved buffer`);
   } catch (error) {
     fail("open file", error);
   }
@@ -720,7 +719,7 @@ function openHex() {
       $("editorWrap").hidden = true;
       $("hexView").scrollTop = 0;
     }
-    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} â€¢ ${state.engine.hexSize} bytes`;
+    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} • ${state.engine.hexSize} bytes`;
     renderHex();
   } catch (error) {
     fail("hex", error);
@@ -750,7 +749,7 @@ function renderHex() {
     const bottom = Math.max(0, (totalRows - firstRow - rows) * rowHeight);
     view.innerHTML = `<div style="height:${top}px"></div>${body}<div style="height:${bottom}px"></div>`;
     $("hexOffset").value = String(offset);
-    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} â€¢ ${state.engine.hexSize} bytes`;
+    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} • ${state.engine.hexSize} bytes`;
   } catch (error) {
     fail("render hex", error);
   }
@@ -795,7 +794,7 @@ async function saveHex() {
       if (!path) return;
     }
     await state.volumes.get(state.volume).write(path, bytes);
-    toast(`saved ${path} â€¢ ${formatBytes(bytes.length)}`);
+    toast(`saved ${path} • ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
     fail("save hex", error);
@@ -844,7 +843,7 @@ function connectTerminal() {
     });
   }
   const url = terminalUrl();
-  $("termStatus").textContent = "connectingâ€¦";
+  $("termStatus").textContent = "connecting…";
   try {
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
@@ -1196,7 +1195,7 @@ async function init() {
   readSettings();
   fillEncodingOptions();
   applySettings();
-  $("statusWasm").textContent = "loadingâ€¦";
+  $("statusWasm").textContent = "loading…";
 
   try {
     const version = await state.engine.init("pwacode.wasm");
@@ -1228,7 +1227,6 @@ async function init() {
   }
 
   if (state.settings.softKeyboard) toggleSoftKeyboard(true);
-  if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
   bindEvents();
   updateStatus();
   renderWindow();
@@ -1239,7 +1237,7 @@ async function seedInternal() {
   try {
     const entries = await state.volumes.internal.list("");
     if (entries.length) return;
-    const sample = `// pwa code â€” fast_io + WebAssembly edition
+    const sample = `// pwa code — fast_io + WebAssembly edition
 // Open the native server for the terminal (WebSocket PTY) and remote volume.
 
 #include <fast_io.h>
