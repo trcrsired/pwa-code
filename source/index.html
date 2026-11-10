@@ -38,6 +38,7 @@
         <button class="vol-tab" data-vol="external" role="tab">External</button>
         <button class="vol-tab" data-vol="remote" role="tab">Remote</button>
       </div>
+      <div id="mountBar" class="mount-bar" role="group" aria-label="Mounts" hidden></div>
       <div class="side-actions">
         <button id="upBtn" class="mini-btn" title="Parent folder">↑ Up</button>
         <button id="refreshBtn" class="mini-btn" title="Refresh">↻</button>
@@ -48,7 +49,7 @@
       <div id="fileList" class="file-list" role="listbox"></div>
       <div class="side-foot">
         <button id="pickExternalBtn" class="mini-btn wide">Mount external folder</button>
-        <button id="addRemoteBtn" class="mini-btn wide" hidden>Add remote mount</button>
+        <button id="addRemoteBtn" class="mini-btn wide">Add remote mount</button>
         <div id="volStatus" class="vol-status"></div>
       </div>
     </aside>
@@ -210,11 +211,11 @@
       </section>
       <section>
         <h3>Terminal &amp; volumes</h3>
-        <label class="row">Remote base URL
-          <input id="setRemoteBase" type="url" placeholder="same origin">
+        <label class="row">Default remote URL
+          <input id="setRemoteBase" type="url" placeholder="auto-mounts once">
         </label>
         <label class="row">Terminal WebSocket
-          <input id="setTermUrl" type="text" placeholder="auto">
+          <input id="setTermUrl" type="text" placeholder="active remote mount / auto">
         </label>
         <label class="row check"><input id="setTermLocalEcho" type="checkbox"> Local echo (debug)</label>
       </section>

@@ -102,6 +102,13 @@ function uniqueName(base, taken) {
   return name;
 }
 
+function normalizeBaseUrl(url) {
+  let base = String(url || "").trim();
+  if (!base) return "";
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(base)) base = `http://${base}`;
+  return base.replace(/\/+$/, "");
+}
+
 // ---------------------------------------------------------------- internal
 
 export class OpfsVolume {
@@ -110,6 +117,10 @@ export class OpfsVolume {
     this.label = label;
     this.kind = "opfs";
     this.rootPromise = null;
+  }
+
+  get readOnly() {
+    return false;
   }
 
   async root() {
@@ -186,6 +197,10 @@ export class ExternalVolume {
     this.label = label;
     this.kind = "fsa";
     this.handle = handle;
+  }
+
+  get readOnly() {
+    return false;
   }
 
   static supported() {
@@ -273,6 +288,14 @@ export class RemoteVolume {
 
   setBase(baseUrl) {
     this.base = (baseUrl || "").replace(/\/+$/, "");
+  }
+
+  get readOnly() {
+    return this.mode === "http";
+  }
+
+  get server() {
+    return this.mode === "server";
   }
 
   url(path, query) {
@@ -418,8 +441,19 @@ export class Volumes {
     this.externalMounts = new Map();
     this.remoteMounts = new Map();
     this.current = "internal";
-    this.mount = "";
+    // One remembered selection per family, so switching tabs never applies an
+    // external mount id to the remote volume (the ids are independent).
+    this.mounts = { external: "", remote: "" };
     this.path = "";
+  }
+
+  get mount() {
+    return this.current === "internal" ? "" : this.mounts[this.current];
+  }
+
+  set mount(id) {
+    if (this.current === "internal") return;
+    this.mounts[this.current] = id || "";
   }
 
   async init(remoteBase) {
@@ -437,8 +471,7 @@ export class Volumes {
     }
     if (this.remoteMounts.size === 0 && remoteBase) {
       try {
-        const id = await this.addRemoteMount("Remote", remoteBase, "auto");
-        this.mount = id;
+        await this.addRemoteMount("Remote", remoteBase, "auto");
       } catch {
         /* invalid saved base */
       }
@@ -467,25 +500,27 @@ export class Volumes {
   get(ref) {
     if (!ref || ref === "internal") return this.internal;
     const colon = ref.indexOf(":");
-    if (colon < 0) {
-      if (ref === "external") return this.externalMounts.get(this.mount);
-      if (ref === "remote") return this.remoteMounts.get(this.mount);
-      return this.internal;
-    }
-    const kind = ref.slice(0, colon);
-    const id = ref.slice(colon + 1);
-    return kind === "external" ? this.externalMounts.get(id) : this.remoteMounts.get(id);
+    const kind = colon < 0 ? ref : ref.slice(0, colon);
+    const id = colon < 0 ? this.mounts[kind] : ref.slice(colon + 1);
+    const map = kind === "external" ? this.externalMounts : kind === "remote" ? this.remoteMounts : null;
+    const volume = map ? map.get(id) : null;
+    if (!volume) throw new Error(`Mount "${id || kind}" is not available. Mount it again.`);
+    return volume;
   }
 
   active() {
     if (this.current === "internal") return this.internal;
-    const volume = this.get(this.current);
-    if (!volume) throw new Error("Select a mount first.");
+    const map = this.current === "external" ? this.externalMounts : this.remoteMounts;
+    if (map.size === 0) throw new Error(`No ${this.current} mount yet.`);
+    const id = this.mounts[this.current];
+    const volume = (id && map.get(id)) || map.values().next().value;
+    if (!volume) throw new Error(`No ${this.current} mount selected.`);
+    if (!id) this.mounts[this.current] = volume.id;
     return volume;
   }
 
   ref() {
-    return this.current === "internal" ? "internal" : `${this.current}:${this.mount}`;
+    return this.current === "internal" ? "internal" : `${this.current}:${this.mounts[this.current]}`;
   }
 
   mounts(kind) {
@@ -518,19 +553,22 @@ export class Volumes {
     const base = (handle && handle.name) || "external";
     const id = uniqueName(base, new Set(this.externalMounts.keys()));
     this.externalMounts.set(id, new ExternalVolume(id, id, handle));
+    this.mounts.external = id;
     await this.persistExternal();
     return id;
   }
 
   async addRemoteMount(name, url, mode = "auto") {
     const label = String(name || "").trim();
-    if (!validMountName(label)) throw new Error("Invalid mount name.");
-    let base = String(url || "").trim();
+    if (!label) throw new Error("Mount name is required.");
+    if (!validMountName(label)) {
+      throw new Error('Mount name cannot contain . / \\ : * ? " < > | or control characters.');
+    }
+    let base = normalizeBaseUrl(url);
     if (!base) throw new Error("Remote URL is required.");
-    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(base)) base = `http://${base}`;
-    base = base.replace(/\/+$/, "");
     const id = uniqueName(label, new Set(this.remoteMounts.keys()));
     this.remoteMounts.set(id, new RemoteVolume(id, label, base, mode));
+    this.mounts.remote = id;
     await this.persistRemote();
     return id;
   }
@@ -543,8 +581,8 @@ export class Volumes {
       this.remoteMounts.delete(id);
       await this.persistRemote();
     }
-    if (this.mount === id) {
-      this.mount = "";
+    if (this.mounts[kind] === id) {
+      this.mounts[kind] = "";
       this.path = "";
     }
   }
@@ -552,9 +590,24 @@ export class Volumes {
   async setRemote(id, base, mode) {
     const volume = this.remoteMounts.get(id);
     if (!volume) throw new Error("Unknown remote mount.");
-    volume.setBase(base);
+    volume.setBase(normalizeBaseUrl(base));
     volume.mode = mode;
     await this.persistRemote();
+  }
+
+  // The Settings "Default remote URL" is a legacy one-shot convenience: it
+  // creates the built-in "Remote" mount when none exists and updates that
+  // mount later.  Everything else is managed from the sidebar mount chips.
+  async syncDefaultRemote(url) {
+    const base = normalizeBaseUrl(url);
+    if (!base) return;
+    const volume = this.remoteMounts.get("Remote");
+    if (volume) {
+      volume.setBase(base);
+      await this.persistRemote();
+      return;
+    }
+    if (this.remoteMounts.size === 0) await this.addRemoteMount("Remote", base, "auto");
   }
 }
 

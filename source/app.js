@@ -6,7 +6,7 @@
 // textarea re-renders just that window, so very large files stay responsive.
 
 import { Engine, EngineError, ENCODINGS } from "./wasm.js";
-import { Volumes, baseName, parentPath } from "./storage.js";
+import { Volumes, ExternalVolume, baseName, parentPath } from "./storage.js";
 import { Terminal, keyToBytes } from "./terminal.js";
 
 const $ = (id) => document.getElementById(id);
@@ -287,6 +287,119 @@ function setEditorText(text) {
   updateStatus();
 }
 
+/* -------------------------------------------------------------- volumes UI */
+
+function setVolTab(kind) {
+  state.volumes.current = kind;
+  state.volumes.path = "";
+  document.querySelectorAll(".vol-tab").forEach((tab) =>
+    tab.classList.toggle("active", tab.dataset.vol === kind),
+  );
+  renderMountBar();
+}
+
+function renderMountBar() {
+  const bar = $("mountBar");
+  bar.textContent = "";
+  const kind = state.volumes.current;
+  if (kind === "internal") {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  for (const mount of state.volumes.mounts(kind)) {
+    const chip = document.createElement("span");
+    chip.className = "mount-chip";
+    chip.classList.toggle("active", mount.id === state.volumes.mount);
+    chip.title = mount.detail ? `${mount.label} — ${mount.detail}` : mount.label;
+    const name = document.createElement("span");
+    name.className = "mount-name";
+    name.textContent = mount.label;
+    const off = document.createElement("span");
+    off.className = "mount-x";
+    off.textContent = "×";
+    off.setAttribute("role", "button");
+    off.title = "Unmount";
+    off.addEventListener("click", (event) => {
+      event.stopPropagation();
+      unmount(kind, mount);
+    });
+    chip.append(name, off);
+    chip.addEventListener("click", () => selectMount(kind, mount.id));
+    bar.appendChild(chip);
+  }
+  const add = document.createElement("span");
+  add.className = "mount-chip add";
+  add.setAttribute("role", "button");
+  add.textContent = "+";
+  add.title = kind === "external" ? "Mount another folder" : "Add remote mount";
+  add.addEventListener("click", () => (kind === "external" ? mountExternal() : openMountModal()));
+  bar.appendChild(add);
+}
+
+async function selectMount(kind, id) {
+  setVolTab(kind);
+  state.volumes.mount = id;
+  renderMountBar();
+  await refreshFiles();
+}
+
+async function unmount(kind, mount) {
+  if (!confirm(`Unmount ${mount.label}?`)) return;
+  try {
+    await state.volumes.removeMount(kind, mount.id);
+    renderMountBar();
+    await refreshFiles();
+    toast(`unmounted ${mount.label}`);
+  } catch (error) {
+    fail("unmount", error);
+  }
+}
+
+async function mountExternal() {
+  if (!ExternalVolume.supported()) {
+    toast("This browser cannot mount folders (File System Access API missing).", true);
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    const id = await state.volumes.addExternalMount(handle);
+    setVolTab("external");
+    state.volumes.mount = id;
+    renderMountBar();
+    await refreshFiles();
+    toast(`mounted ${handle.name}`);
+  } catch (error) {
+    if (error && error.name === "AbortError") return;
+    fail("mount folder", error);
+  }
+}
+
+function openMountModal() {
+  $("mountName").value = "";
+  $("mountUrl").value = "";
+  $("mountMode").value = "auto";
+  $("mountModal").hidden = false;
+  $("mountName").focus();
+}
+
+async function addMountFromForm() {
+  const name = $("mountName").value;
+  const url = $("mountUrl").value;
+  const mode = $("mountMode").value;
+  try {
+    const id = await state.volumes.addRemoteMount(name, url, mode);
+    $("mountModal").hidden = true;
+    setVolTab("remote");
+    state.volumes.mount = id;
+    renderMountBar();
+    await refreshFiles();
+    toast(`mounted ${name}`);
+  } catch (error) {
+    fail("add mount", error);
+  }
+}
+
 /* ---------------------------------------------------------------- loading */
 
 async function openPath(path) {
@@ -295,7 +408,7 @@ async function openPath(path) {
     const bytes = await volume.read(path);
     const info = state.engine.load(bytes, path, -1);
     state.path = path;
-    state.volume = state.volumes.current;
+    state.volume = state.volumes.ref();
     setEditorText(state.engine.text);
     // Keep the buffer LF.  Preserve means a CRLF source is written back as
     // CRLF and an LF source stays LF; explicit LF/CRLF remains a user choice.
@@ -317,10 +430,28 @@ async function openPath(path) {
 }
 
 async function refreshFiles() {
-  const volume = state.volumes.active();
   const list = $("fileList");
   list.textContent = "";
-  $("volStatus").textContent = `${volume.label} • ${volume.kind}`;
+  $("pathBar").textContent = `/${state.volumes.path}`;
+  let volume = null;
+  try {
+    volume = state.volumes.active();
+  } catch {
+    volume = null;
+  }
+  if (!volume) {
+    const kind = state.volumes.current;
+    $("volStatus").textContent = kind === "internal" ? "internal storage" : `no ${kind} mount yet`;
+    const hint = document.createElement("div");
+    hint.className = "file-empty";
+    hint.textContent = kind === "external"
+      ? "No external folder mounted. Use + to mount one."
+      : "No remote mount yet. Use + to add an HTTP directory or pwa-code server.";
+    list.appendChild(hint);
+    return;
+  }
+  $("volStatus").textContent =
+    `${volume.label} • ${volume.kind}${volume.readOnly ? " • read-only" : ""}`;
   try {
     const entries = await volume.list(state.volumes.path);
     if (!entries.length) {
@@ -343,7 +474,7 @@ async function refreshFiles() {
       name.className = "fname";
       name.textContent = entry.name;
       row.append(icon, name);
-      if (entry.dir || state.volumes.current !== "remote") {
+      if (!volume.readOnly) {
         const del = document.createElement("button");
         del.className = "fdel";
         del.title = entry.dir ? "Remove folder" : "Remove file";
@@ -380,7 +511,7 @@ async function refreshFiles() {
     empty.textContent = error.message || String(error);
     list.appendChild(empty);
     if (state.volumes.current === "remote") {
-      toast("Remote volume is not reachable. Set the base URL in Settings.", true);
+      toast("Remote mount is not reachable. Check its URL, or add a new mount.", true);
     }
   }
   $("pathBar").textContent = `/${state.volumes.path}`;
@@ -436,7 +567,7 @@ async function saveDocument(saveAs = false) {
     const name = prompt("Save as (path inside the current volume)", suggested);
     if (!name) return;
     state.path = name;
-    state.volume = state.volumes.current;
+    state.volume = state.volumes.ref();
   }
   try {
     syncEditorToEngine();
@@ -460,7 +591,7 @@ async function openFromFileInput(file) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const info = state.engine.load(bytes, file.name, -1);
     state.path = "";
-    state.volume = state.volumes.current;
+    state.volume = state.volumes.ref();
     setEditorText(state.engine.text);
     state.settings.eol = 0;
     $("statusEol").textContent = EOL_LABELS[0];
@@ -578,6 +709,28 @@ async function saveHex() {
 
 function terminalUrl() {
   if (state.settings.termUrl) return state.settings.termUrl;
+  // A remote mount of the pwa-code server family also carries the PTY
+  // terminal, so "connect" targets the machine whose files are open.
+  if (state.volumes.current === "remote") {
+    let volume = null;
+    try {
+      volume = state.volumes.get(state.volumes.ref());
+    } catch {
+      volume = null;
+    }
+    if (volume && volume.server && volume.base) {
+      try {
+        const url = new URL(volume.base);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        url.pathname = `${url.pathname.replace(/\/+$/, "")}/ws/term`;
+        url.search = "";
+        url.hash = "";
+        return url.toString();
+      } catch {
+        /* fall through to same origin */
+      }
+    }
+  }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/ws/term`;
 }
@@ -923,13 +1076,20 @@ async function applySettingsForm() {
   s.termLocalEcho = $("setTermLocalEcho").checked;
   saveSettings();
   applySettings();
-  state.volumes.remote.setBase(s.remoteBase);
+  if (s.remoteBase) {
+    try {
+      await state.volumes.syncDefaultRemote(s.remoteBase);
+    } catch {
+      /* invalid legacy URL */
+    }
+  }
   if (state.engineReady) {
     state.engine.setEncoding(s.encoding, state.engine.bom);
     state.engine.setEol(s.eol);
   }
   $("statusEol").textContent = EOL_LABELS[s.eol];
-  if (state.volumes.current === "remote") await refreshFiles();
+  renderMountBar();
+  if (state.volumes.current !== "internal") await refreshFiles();
   toast("settings saved");
 }
 
@@ -951,21 +1111,10 @@ async function init() {
   }
 
   await state.volumes.init(state.settings.remoteBase);
-  state.volumes.current = "internal";
-  state.volumes.path = "";
+  setVolTab("internal");
   document.querySelectorAll(".vol-tab").forEach((tab) => {
-    tab.classList.toggle("active", tab.dataset.vol === "internal");
     tab.addEventListener("click", async () => {
-      state.volumes.current = tab.dataset.vol;
-      state.volumes.path = "";
-      document.querySelectorAll(".vol-tab").forEach((t) => t.classList.toggle("active", t === tab));
-      if (tab.dataset.vol === "external" && !state.volumes.external.handle) {
-        try {
-          await state.volumes.external.pick();
-        } catch (error) {
-          fail("external folder", error);
-        }
-      }
+      setVolTab(tab.dataset.vol);
       await refreshFiles();
     });
   });
@@ -1195,17 +1344,20 @@ function bindEvents() {
   $("refreshBtn").addEventListener("click", refreshFiles);
   $("newFileBtn").addEventListener("click", newFile);
   $("newDirBtn").addEventListener("click", newFolder);
-  $("pickExternalBtn").addEventListener("click", async () => {
-    try {
-      await state.volumes.external.pick();
-      state.volumes.current = "external";
-      state.volumes.path = "";
-      document.querySelectorAll(".vol-tab").forEach((t) =>
-        t.classList.toggle("active", t.dataset.vol === "external"));
-      await refreshFiles();
-      toast("external folder connected");
-    } catch (error) {
-      fail("external folder", error);
+  $("pickExternalBtn").addEventListener("click", mountExternal);
+  $("addRemoteBtn").addEventListener("click", openMountModal);
+  $("mountClose").addEventListener("click", () => ($("mountModal").hidden = true));
+  $("mountCancel").addEventListener("click", () => ($("mountModal").hidden = true));
+  $("mountAdd").addEventListener("click", addMountFromForm);
+  $("mountModal").addEventListener("click", (event) => {
+    if (event.target === $("mountModal")) $("mountModal").hidden = true;
+  });
+  $("mountModal").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.tagName !== "SELECT") {
+      event.preventDefault();
+      addMountFromForm();
+    } else if (event.key === "Escape") {
+      $("mountModal").hidden = true;
     }
   });
 
