@@ -2,7 +2,7 @@
 // editor opens offline; the remote volume API and the terminal WebSocket are
 // never cached (they are live native-server endpoints).
 
-const VERSION = "3";
+const VERSION = "4";
 const CACHE = `pwacode-cache-v${VERSION}`;
 const ASSETS = [
   "./",

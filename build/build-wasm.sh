@@ -77,6 +77,7 @@ mkdir -p "$ROOT/source"
 
 # shellcheck disable=SC2086
 "$CXX" --config="$CONFIG" \
+    -msimd128 \
     -fherbceptions -lherbceptions \
     -O3 -flto=thin -s \
     -fno-exceptions -fno-rtti \

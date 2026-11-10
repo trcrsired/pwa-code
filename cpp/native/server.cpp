@@ -457,15 +457,21 @@ fi::io_async_task<> serve_static(fi::io_async_observer sched, fi::u8iobuf_socket
 		}
 	}
 
-	fi::u8native_file f{fi::mnp::os_c_str(chosen.data()),
-						fi::open_mode::in | fi::open_mode::no_block};
-	auto const st{fi::status(f)};
-	if (st.type == fi::file_type::directory)
 	{
-		co_await send_simple(sched, sock, 404, u8"Not Found", u8"not found", req, false);
-		co_return;
+		fi::u8native_file probe{fi::mnp::os_c_str(chosen.data()),
+								fi::open_mode::in | fi::open_mode::no_block};
+		auto const st{fi::status(probe)};
+		if (st.type == fi::file_type::directory)
+		{
+			co_await send_simple(sched, sock, 404, u8"Not Found", u8"not found", req, false);
+			co_return;
+		}
 	}
-	auto const length{st.size};
+	// Map the response body instead of looping over pread.  The loader keeps
+	// the mapping alive for the duration of the coroutine, and the socket
+	// write becomes one scatter from the page cache.
+	fi::native_file_loader loader{fi::mnp::os_c_str(chosen.data())};
+	auto const length{loader.size()};
 	fi::u8string encoding_header;
 	if (!content_encoding.is_empty())
 	{
@@ -480,8 +486,8 @@ fi::io_async_task<> serve_static(fi::io_async_observer sched, fi::u8iobuf_socket
 		u8"\r\n\r\n");
 	if (!req.head && length != 0)
 	{
-		co_await fop::async_transmit_all_bytes(sched, {}, sock, {}, f, {},
-											   fi::size_t_opt{static_cast<::std::size_t>(length)});
+		co_await fop::async_pwrite_all_bytes(
+			sched, {}, sock, reinterpret_cast<::std::byte const *>(loader.data()), length, {});
 	}
 	co_await fop::async_output_stream_flush(sched, {}, sock);
 }
@@ -576,20 +582,28 @@ fi::io_async_task<> api_file(fi::io_async_observer sched, fi::u8iobuf_socket_fil
 	}
 	try
 	{
-		fi::u8native_file f{fi::mnp::os_c_str(path.data()),
-							fi::open_mode::in | fi::open_mode::no_block};
-		auto const st{fi::status(f)};
+		{
+			fi::u8native_file probe{fi::mnp::os_c_str(path.data()),
+									fi::open_mode::in | fi::open_mode::no_block};
+			auto const st{fi::status(probe)};
+			if (st.type == fi::file_type::directory)
+			{
+				co_await send_simple(sched, sock, 404, u8"Not Found", u8"not found", req, false);
+				co_return;
+			}
+		}
+		fi::native_file_loader loader{fi::mnp::os_c_str(path.data())};
+		auto const length{loader.size()};
 		co_await fi::io::async_print(
 			sched, {}, sock, u8"HTTP/1.1 200 OK\r\nContent-Type: ", mime_of(sv(decoded.path)),
-			u8"\r\nCache-Control: no-store\r\n", cors_headers(), u8"Content-Length: ", st.size,
+			u8"\r\nCache-Control: no-store\r\n", cors_headers(), u8"Content-Length: ", length,
 			u8"\r\nConnection: ",
 			req.keep_alive ? fi::u8string_view{u8"keep-alive"} : fi::u8string_view{u8"close"},
 			u8"\r\n\r\n");
-		if (!req.head && st.size != 0)
+		if (!req.head && length != 0)
 		{
-			co_await fop::async_transmit_all_bytes(
-				sched, {}, sock, {}, f, {},
-				fi::size_t_opt{static_cast<::std::size_t>(st.size)});
+			co_await fop::async_pwrite_all_bytes(
+				sched, {}, sock, reinterpret_cast<::std::byte const *>(loader.data()), length, {});
 		}
 		co_await fop::async_output_stream_flush(sched, {}, sock);
 	}

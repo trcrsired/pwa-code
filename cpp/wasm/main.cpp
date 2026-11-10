@@ -235,11 +235,10 @@ extern "C"
 			::fast_io::u8string decoded;
 			pwa::decode_to_utf8(reinterpret_cast<::std::byte const *>(data), len, probe, decoded);
 			doc.reset();
-			doc.set_text(::fast_io::u8string_view{decoded.data(), decoded.size()}, true);
+			doc.set_text_owned(::std::move(decoded), true);
 			doc.set_path(::fast_io::u8string_view{path, path_len});
 			doc.set_encoding(probe.encoding, probe.has_bom);
 			doc.set_source_crlf(probe.source_crlf);
-			doc.load_hex(reinterpret_cast<::std::byte const *>(data), len);
 			return static_cast<::std::uint_least32_t>(probe.encoding);
 		},
 		::std::uint_least32_t{255});

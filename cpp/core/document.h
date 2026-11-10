@@ -60,10 +60,19 @@ public:
 	{
 		text_.clear();
 		text_.reserve(text.size());
+		if (!normalize_crlf || !contains_cr(text.data(), text.size()))
+		{
+			if (text.size() != 0)
+			{
+				text_.append(text.data(), text.size());
+			}
+			rebuild_index();
+			return;
+		}
 		for (::std::size_t i{}; i != text.size(); ++i)
 		{
 			char8_t const c{text[i]};
-			if (normalize_crlf && c == u8'\r')
+			if (c == u8'\r')
 			{
 				if (i + 1 < text.size() && text[i + 1] == u8'\n')
 				{
@@ -74,6 +83,39 @@ public:
 			else
 			{
 				text_.push_back(c);
+			}
+		}
+		rebuild_index();
+	}
+
+	// Take ownership of already-decoded UTF-8 text.  This avoids a second
+	// full-document copy on the wasm load path, which matters for very large
+	// files; CRLF normalisation is done in place.
+	void set_text_owned(::fast_io::u8string &&text, bool normalize_crlf) throws
+	{
+		text_ = ::std::move(text);
+		if (normalize_crlf && contains_cr(text_.data(), text_.size()))
+		{
+			::std::size_t write{};
+			for (::std::size_t read{}; read != text_.size(); ++read)
+			{
+				char8_t const c{text_[read]};
+				if (c == u8'\r')
+				{
+					if (read + 1 < text_.size() && text_[read + 1] == u8'\n')
+					{
+						continue;
+					}
+					text_[write++] = u8'\n';
+				}
+				else
+				{
+					text_[write++] = c;
+				}
+			}
+			if (write != text_.size())
+			{
+				text_.resize(write);
 			}
 		}
 		rebuild_index();
@@ -387,7 +429,7 @@ public:
 		{
 			count = line_starts_.size() - first_line;
 		}
-		ensure_cache();
+		ensure_cache_through(first_line + count);
 		auto state{state_cache_[first_line]};
 		int depth{depth_cache_[first_line]};
 		::fast_io::u8ostring_ref_fast_io writer{__builtin_addressof(out)};
@@ -521,13 +563,83 @@ public:
 	}
 
 private:
+	// CRLF normalisation is a no-op for the overwhelmingly common LF file.
+	// Scan a SIMD lane at a time so a large UTF-8 document does not pay a
+	// scalar pass over every byte just to discover there is no CR.
+	[[nodiscard]] static bool contains_cr(char8_t const *data, ::std::size_t size) noexcept
+	{
+		::std::size_t i{};
+		if (size >= 16)
+		{
+			constexpr ::std::size_t lane{16};
+			using vector_type = ::fast_io::intrinsics::simd_vector<char8_t, lane>;
+			vector_type crs{};
+			for (::std::size_t k{}; k != lane; ++k)
+			{
+				crs.value[k] = u8'\r';
+			}
+			for (; i + lane <= size; i += lane)
+			{
+				vector_type block;
+				block.load(data + i);
+				if (!::fast_io::intrinsics::is_all_zeros(block == crs))
+				{
+					return true;
+				}
+			}
+		}
+		for (; i != size; ++i)
+		{
+			if (data[i] == u8'\r')
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	void rebuild_index() throws
 	{
 		line_starts_.clear();
 		line_starts_.push_back(0);
-		for (::std::size_t i{}; i != text_.size(); ++i)
+		auto const size{text_.size()};
+		auto const *data{text_.data()};
+		::std::size_t i{};
+		// The newline scan is the hot path when opening a large file (and on
+		// every edit, because the index is rebuilt).  Compare a whole SIMD
+		// lane at a time and only walk the bytes of lanes that contain a
+		// newline.  The same code falls back to fast_io's scalar simd_vector
+		// implementation on targets without SIMD.
+		if (size >= 16)
 		{
-			if (text_[i] == u8'\n')
+			constexpr ::std::size_t lane{16};
+			using vector_type = ::fast_io::intrinsics::simd_vector<char8_t, lane>;
+			vector_type newlines{};
+			for (::std::size_t k{}; k != lane; ++k)
+			{
+				newlines.value[k] = u8'\n';
+			}
+			for (; i + lane <= size; i += lane)
+			{
+				vector_type block;
+				block.load(data + i);
+				auto const mask{block == newlines};
+				if (::fast_io::intrinsics::is_all_zeros(mask))
+				{
+					continue;
+				}
+				for (::std::size_t k{}; k != lane; ++k)
+				{
+					if (mask.value[k] != 0)
+					{
+						line_starts_.push_back(i + k + 1);
+					}
+				}
+			}
+		}
+		for (; i != size; ++i)
+		{
+			if (data[i] == u8'\n')
 			{
 				line_starts_.push_back(i + 1);
 			}
@@ -535,25 +647,53 @@ private:
 		cache_valid_ = false;
 	}
 
-	void ensure_cache() const throws
+	// Only the visible prefix needs a syntax state.  Building the table lazily
+	// keeps the first paint of a huge file cheap and bounds memory to the lines
+	// that have actually been looked at.
+	void ensure_cache_through(::std::size_t count) const throws
 	{
-		if (cache_valid_ && state_cache_.size() == line_starts_.size())
+		if (line_starts_.is_empty())
 		{
 			return;
 		}
-		state_cache_.clear();
-		depth_cache_.clear();
-		state_cache_.resize(line_starts_.size());
-		depth_cache_.resize(line_starts_.size());
+		if (count > line_starts_.size())
+		{
+			count = line_starts_.size();
+		}
+		if (!cache_valid_)
+		{
+			state_cache_.clear();
+			depth_cache_.clear();
+			cache_valid_ = true;
+		}
+		auto const have{state_cache_.size()};
+		if (have >= count)
+		{
+			return;
+		}
+		if (lang_ == nullptr)
+		{
+			// Plain text has no multi-line state; value-initialisation is enough
+			// and avoids walking millions of lines just to store zeroes.
+			state_cache_.resize(count);
+			depth_cache_.resize(count);
+			return;
+		}
+		state_cache_.resize(count);
+		depth_cache_.resize(count);
 		syntax::render_state state{};
 		int depth{};
-		for (::std::size_t i{}; i != line_starts_.size(); ++i)
+		if (have != 0)
+		{
+			state = state_cache_[have - 1];
+			depth = depth_cache_[have - 1];
+		}
+		for (::std::size_t i{have}; i != count; ++i)
 		{
 			state_cache_[i] = state;
 			depth_cache_[i] = depth;
 			syntax::scan_line_full(line(i), lang_, state, depth);
 		}
-		cache_valid_ = true;
 	}
 
 	::fast_io::u8string text_;

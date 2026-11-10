@@ -3,6 +3,8 @@
 /pwacode-server.exe
 /pwacode-cli
 /pwacode-cli.exe
+/cpp/native/server
+/cpp/native/server.exe
 /.ignores
 
 # Node tooling

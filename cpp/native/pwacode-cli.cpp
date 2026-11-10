@@ -46,17 +46,12 @@ constexpr fi::u8string_view sv(fi::u8string const &s) noexcept
 	return fi::u8string_view{s.data(), s.size()};
 }
 
-fi::vector<::std::byte> read_file(fi::u8string_view path) throws
+// Map the file instead of reading it through pread.  The loader owns the
+// mapping for as long as the returned object lives, so the document can index
+// the bytes directly and no per-file read loop is needed.
+fi::native_file_loader read_file(fi::u8string_view path) throws
 {
-	fi::u8native_file file{fi::mnp::os_c_str(path.data()), fi::open_mode::in};
-	auto const st{fi::status(file)};
-	fi::vector<::std::byte> bytes;
-	bytes.resize(static_cast<::std::size_t>(st.size));
-	if (!bytes.is_empty())
-	{
-		fop::read_all_bytes(file, bytes.data(), bytes.size());
-	}
-	return bytes;
+	return fi::native_file_loader{fi::mnp::os_c_str(path.data())};
 }
 
 void write_file(fi::u8string_view path, ::std::byte const *data, ::std::size_t size) throws
@@ -142,21 +137,24 @@ void run(options const &opt) throws
 	}
 
 	auto const bytes{read_file(sv(opt.path))};
-	auto probe{pwa::probe_encoding(bytes.data(), bytes.size())};
+	auto const raw_size{bytes.size()};
+	auto const raw{raw_size != 0 ? reinterpret_cast<::std::byte const *>(bytes.data())
+								 : static_cast<::std::byte const *>(nullptr)};
+	auto probe{pwa::probe_encoding(raw, raw_size)};
 	if (opt.encoding >= 0)
 	{
 		if (opt.encoding > 7) throw throws ::std::errc::invalid_argument;
 		probe.encoding = static_cast<pwa::text_encoding>(opt.encoding);
 	}
 	fi::u8string text;
-	pwa::decode_to_utf8(bytes.data(), bytes.size(), probe, text);
+	pwa::decode_to_utf8(raw, raw_size, probe, text);
 
 	pwa::document doc{};
-	doc.set_text(::fast_io::u8string_view{text.data(), text.size()}, true);
+	doc.set_text_owned(::std::move(text), true);
 	doc.set_path(sv(opt.path));
 	doc.set_encoding(probe.encoding, probe.has_bom);
 	doc.set_source_crlf(probe.source_crlf);
-	doc.load_hex(bytes.data(), bytes.size());
+	doc.load_hex(raw, raw_size);
 	if (opt.eol >= 0)
 	{
 		doc.set_eol_mode(static_cast<pwa::eol_mode>(opt.eol));

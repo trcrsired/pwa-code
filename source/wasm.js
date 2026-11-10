@@ -285,8 +285,8 @@ export class Engine {
   }
 
   hexFromText() {
+    // The bytes stay in the engine; callers that need them use hexBytes().
     this.exports.pwa_hex_from_text();
     this._check();
-    return this._outBytes();
   }
 }

@@ -270,6 +270,34 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 			continue;
 		}
 
+		// Strings come before comment detection: "/*" and "//" inside a
+		// string literal are text, not the start of a comment.
+		if (line[i] == u8'"' || line[i] == u8'\'' || line[i] == u8'`')
+		{
+			auto const quote{line[i]};
+			auto const begin{i};
+			++i;
+			while (i < line.size())
+			{
+				if (line[i] == u8'\\' && i + 1 < line.size())
+				{
+					i += 2;
+					continue;
+				}
+				if (line[i] == quote)
+				{
+					++i;
+					break;
+				}
+				++i;
+			}
+			span_begin(out, u8"s");
+			print_escaped(out, ::fast_io::u8string_view{line.data() + begin, i - begin});
+			span_end(out);
+			first_token = false;
+			continue;
+		}
+
 		// Line comment.
 		if (!line_comment.is_empty() && starts_at(line, i, line_comment))
 		{
@@ -318,35 +346,6 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 			print_escaped(out, ::fast_io::u8string_view{line.data() + i, line.size() - i});
 			span_end(out);
 			return;
-		}
-
-		// Strings.  Backtick is included for JS/TS; language tables do not
-		// carry quote styles, so accepting all three for every language is
-		// harmless and keeps the lexer small.
-		if (line[i] == u8'"' || line[i] == u8'\'' || line[i] == u8'`')
-		{
-			auto const quote{line[i]};
-			auto const begin{i};
-			++i;
-			while (i < line.size())
-			{
-				if (line[i] == u8'\\' && i + 1 < line.size())
-				{
-					i += 2;
-					continue;
-				}
-				if (line[i] == quote)
-				{
-					++i;
-					break;
-				}
-				++i;
-			}
-			span_begin(out, u8"s");
-			print_escaped(out, ::fast_io::u8string_view{line.data() + begin, i - begin});
-			span_end(out);
-			first_token = false;
-			continue;
 		}
 
 		// Numbers.
@@ -464,17 +463,10 @@ inline void scan_line_full(::fast_io::u8string_view line, keywords::language con
 			}
 			continue;
 		}
-		if (!line_comment.is_empty() && starts_at(line, i, line_comment))
-		{
-			return;
-		}
-		if (!block_open.is_empty() && starts_at(line, i, block_open))
-		{
-			state.in_block_comment = true;
-			i += block_open.size();
-			continue;
-		}
 		auto const c{line[i]};
+		// Skip string literals before looking for comment markers, otherwise
+		// a "/*" or "//" inside a string would poison the state of every
+		// following line.
 		if (c == u8'"' || c == u8'\'' || c == u8'`')
 		{
 			auto const quote{c};
@@ -493,6 +485,16 @@ inline void scan_line_full(::fast_io::u8string_view line, keywords::language con
 				}
 				++i;
 			}
+			continue;
+		}
+		if (!line_comment.is_empty() && starts_at(line, i, line_comment))
+		{
+			return;
+		}
+		if (!block_open.is_empty() && starts_at(line, i, block_open))
+		{
+			state.in_block_comment = true;
+			i += block_open.size();
 			continue;
 		}
 		if (c == u8'(' || c == u8'[' || c == u8'{')
@@ -531,6 +533,27 @@ inline void scan_line(::fast_io::u8string_view line, keywords::language const *l
 			if (state.in_block_comment)
 			{
 				return;
+			}
+			continue;
+		}
+		auto const c{line[i]};
+		if (c == u8'"' || c == u8'\'' || c == u8'`')
+		{
+			auto const quote{c};
+			++i;
+			while (i < line.size())
+			{
+				if (line[i] == u8'\\' && i + 1 < line.size())
+				{
+					i += 2;
+					continue;
+				}
+				if (line[i] == quote)
+				{
+					++i;
+					break;
+				}
+				++i;
 			}
 			continue;
 		}

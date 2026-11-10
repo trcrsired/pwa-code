@@ -7,9 +7,15 @@ shipped as an installable PWA, plus an async native coding server.
 - **Portable engine** — header-only `cpp/core/` works in wasm and natively.
 - **Browser editor** — touch/mobile/desktop/tablet/VR, real textarea input with
   a wasm-rendered, refterm-style partial-view highlighting underlay.
-- **Volumes** — browser OPFS (internal), File System Access (external), and the
-  native server's workspace API (remote), plus an optional WASI preview1
-  filesystem layer.
+- **Volumes** — browser OPFS (internal), any number of File System Access
+  mounts (external), and any number of remote mounts (pwa-code server with
+  read/write + terminal, or a plain HTTP directory index read-only), plus an
+  optional WASI preview1 filesystem layer.
+- **Large files** — above 8 MiB or 200k lines the editor switches to a
+  read-only virtual partial view, so opening a 76 MB / 10M-line file does not
+  stall the textarea.  Small files stay fully editable.
+- **SIMD** — the wasm build uses `-msimd128`; the newline index and CRLF scan
+  use `fast_io::intrinsics::simd_vector`, with a scalar fallback.
 - **Encodings** — UTF-8, UTF-8LE, UTF-16LE/BE, UTF-32LE/BE, GB18030,
   UTF-EBCDIC, BOM detection.  Internally always UTF-8 + LF; save re-encodes with
   the source policy.
@@ -63,7 +69,9 @@ pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public
 
 Static assets are served from `docs/` with Brotli/Gzip negotiation.  LNA
 defaults to loopback/local peers; the terminal and HTTP server are fully async
-and use no `std::thread`.
+and use no `std::thread`.  File responses use `fast_io::native_file_loader`
+(memory-mapped I/O) instead of a `pread` loop, and the CLI maps its input the
+same way.
 
 ## Native core demo
 

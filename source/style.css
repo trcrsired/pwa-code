@@ -416,6 +416,22 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
   overflow: hidden;
 }
 
+/* Huge files use the refterm-style partial view: the textarea is not given
+ * millions of lines to lay out.  A transparent scroll proxy supplies the
+ * scrollbar and the wasm engine paints only the visible window. */
+.large-scroll {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  background: transparent;
+}
+.large-scroll[hidden] { display: none; }
+.large-spacer { width: 1px; min-height: 1px; }
+body.large-mode .editor { visibility: hidden; }
+
 .highlight, .editor {
   font-family: var(--mono);
   font-size: var(--font-size);
@@ -460,6 +476,15 @@ body.wrap-mode .editor {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* The large-file view is a fixed-height virtual window; wrapping would break
+ * its scrollbar mapping, so it always renders one visual row per line. */
+body.large-mode .highlight .vl {
+  height: var(--line-height);
+  min-height: var(--line-height);
+  white-space: pre;
+  overflow-wrap: normal;
+}
+body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
 .wrap-measure {
   position: absolute;
   left: 0;
@@ -796,13 +821,18 @@ body[data-theme="light"] .ansi-white { color: #333; }
   .doc-head { border-left: 0; padding-left: 0; }
   #sidebar {
     position: absolute;
-    top: 44px;
-    bottom: 26px;
+    /* #body already starts under the top bar and ends above the status bar.
+     * Offsetting again here left a 44px gap at the top and a 26px gap at the
+     * bottom, which is what clipped the file list on phones. */
+    top: 0;
+    bottom: 0;
     left: 0;
     z-index: 40;
-    width: min(84vw, 320px);
+    width: min(84vw, 340px);
+    max-width: 100%;
     box-shadow: 12px 0 32px rgba(0, 0, 0, 0.4);
   }
+  .file-list { overscroll-behavior: contain; }
   #statusbar { gap: 8px; }
   #statusLang, #statusWasm { display: none; }
   .modal-body { grid-template-columns: 1fr; }

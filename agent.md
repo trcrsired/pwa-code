@@ -74,6 +74,14 @@ filesystem header is opt-in and is not linked into it.
 - The editor is a real `<textarea>` for selection/IME/accessibility, overlaid on
   a wasm-rendered highlighted underlay.  Only the visible line window is
   rendered (refterm-style partial view).
+- Very large files (> 8 MiB or > 200k lines) open in a read-only virtual
+  partial view.  The textarea is never given millions of lines to lay out; a
+  transparent scroll proxy maps the whole document (scaled when it exceeds the
+  browser's maximum scroll height) and the wasm engine paints the visible
+  window.  Small files keep the editable textarea.
+- Multiple external mounts and multiple remote mounts are supported.  Remote
+  mounts can be a pwa-code server (read/write + terminal) or a plain HTTP
+  directory index (read-only).
 
 ## 3. Layout
 
@@ -95,9 +103,14 @@ docs/              built, deployable PWA (+ .gz/.br precompressed assets)
 ### Core APIs (`cpp/core/document.h`)
 
 `document` owns the UTF-8 LF text, line offsets and hex bytes.  Public methods
-include `set_text`, `insert`, `replace`, `line_count`, `render_view`,
-`render_hex`, `patch_hex`, `bracket_match`, `indent`, `save_bytes`,
-`set_encoding`, `set_eol_mode`.  Failures throw `::std::error`.
+include `set_text`, `set_text_owned`, `insert`, `replace`, `line_count`,
+`render_view`, `render_hex`, `patch_hex`, `bracket_match`, `indent`,
+`save_bytes`, `set_encoding`, `set_eol_mode`.  Failures throw `::std::error`.
+
+The newline index and the CRLF-normalisation check use
+`fast_io::intrinsics::simd_vector` (16-byte lanes, scalar fallback).  The wasm
+build enables `-msimd128`.  Syntax state is built lazily only up to the visible
+window, so opening a huge file does not scan every line before the first paint.
 
 ### Wasm ABI (`cpp/wasm/main.cpp`)
 
@@ -120,6 +133,10 @@ pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public
 - LNA defaults to local addresses.
 - Pure async: one coroutine pumps PTY and socket with timed async reads; no
   threads.
+- File responses and the CLI map files with `fast_io::native_file_loader`
+  (`mmap` on POSIX, mapping on Windows) and write the mapped bytes, rather than
+  looping over `pread`.  The CLI maps the input directly, so the portable core
+  reads the same bytes without a copy.
 
 ## 4. Build
 
@@ -161,6 +178,13 @@ Run locally:
 7. Terminal connects and echoes `FINAL_OK`.
 8. Remote volume with a dead base URL shows a clean toast, not an unhandled
    rejection.
-9. 390×844 layout has no horizontal overflow; soft keyboard overlays.
+9. 390×844 layout has no horizontal overflow; the sidebar fills the space
+   between the top and status bars, stays open when a directory is chosen, and
+   closes only after a file is chosen.  Soft keyboard overlays correctly.
 10. Offline reload is served by the service worker.
 11. Native core: `pwacode-cli` view/hex/UTF-16 save.
+12. Large file (the fast_io 76 MB `iobuf_file.txt`): opens in under a couple of
+   seconds in the read-only partial view, the scrollbar reaches the end, and
+   Ctrl+G maps to the requested line.
+13. A string containing `/*`, `*/` or `//` is highlighted as a string, and code
+   after `*/` on the same or later line is not tinted as a comment.

@@ -53,7 +53,21 @@ const state = {
   wrapKey: "",
   wrapOffsets: null,
   wrapDirty: true,
+  largeMode: false,
+  largeFirst: 0,
+  largeScaled: false,
 };
+
+// A textarea with tens of millions of lines takes minutes to lay out and
+// stalls the whole tab.  Above these bounds the editor switches to the
+// read-only partial view, which still scrolls through the whole file.
+const LARGE_FILE_BYTES = 8 * 1024 * 1024;
+const LARGE_FILE_LINES = 200000;
+
+// Chromium caps a scroll container at roughly 33.5M pixels.  When a document
+// is taller than that, the virtual scrollbar maps its whole range instead of
+// stopping after the first few million lines.
+const MAX_SCROLL_PX = 30000000;
 
 /* --------------------------------------------------------------- helpers */
 
@@ -125,6 +139,7 @@ function applySettings() {
     $("highlight").style.width = "";
   }
   state.wrapDirty = true;
+  refreshLargeSpacer();
   $("statusEncoding").textContent = ENCODINGS[
     state.engineReady ? state.engine.encoding : s.encoding
   ] || "UTF-8";
@@ -161,22 +176,32 @@ function updateDirty(dirty) {
 
 function updateStatus() {
   const editor = $("editor");
-  const text = editor.value;
-  const cursor = editor.selectionStart;
-  const before = text.slice(0, cursor);
-  const line = before.split("\n").length;
-  const lastNl = before.lastIndexOf("\n");
-  const col = cursor - lastNl;
-  $("statusLine").textContent = `Ln ${line}, Col ${col}`;
-  const selected = editor.selectionEnd - editor.selectionStart;
+  const large = state.largeMode;
+  let line = 1;
+  let col = 1;
+  let selected = 0;
+  if (large) {
+    line = state.largeFirst + 1;
+  } else {
+    const text = editor.value;
+    const cursor = editor.selectionStart;
+    const before = text.slice(0, cursor);
+    line = before.split("\n").length;
+    const lastNl = before.lastIndexOf("\n");
+    col = cursor - lastNl;
+    selected = editor.selectionEnd - editor.selectionStart;
+  }
+  $("statusLine").textContent = large ? `Ln ${line}` : `Ln ${line}, Col ${col}`;
   $("statusSel").textContent = selected ? `Sel ${selected}` : "";
   $("statusLang").textContent = state.engineReady ? (state.engine.language || "plain") : "plain";
-  $("statusSize").textContent = formatBytes(state.engineReady ? state.engine.size : new TextEncoder().encode(text).length);
+  $("statusSize").textContent = formatBytes(
+    state.engineReady ? state.engine.size : new TextEncoder().encode(editor.value).length,
+  );
   if (state.engineReady) {
     $("statusEncoding").textContent = ENCODINGS[state.engine.encoding] || "UTF-8";
   }
   $("statusWasm").textContent = state.engineReady ? "wasm" : "engine…";
-  $("docName").textContent = state.path || "untitled";
+  $("docName").textContent = state.path ? `${state.path}${large ? " (view)" : ""}` : large ? "untitled (view)" : "untitled";
   updateGutterCursor(line);
 }
 
@@ -210,7 +235,7 @@ function renderGutter(first, count) {
     div.textContent = String(n + 1);
     // In wrap mode a logical line owns as many visual rows as it wraps into,
     // so the number sits at the top of its block.
-    div.style.height = `${(state.settings.wrap ? wrapRowsOf(n) : 1) * lineHeight}px`;
+    div.style.height = `${(state.settings.wrap && !state.largeMode ? wrapRowsOf(n) : 1) * lineHeight}px`;
     div.style.lineHeight = `${lineHeight}px`;
     frag.appendChild(div);
   }
@@ -345,8 +370,90 @@ function wrapRowsOf(line) {
   return Math.max(1, offsets[line + 1] - offsets[line]);
 }
 
+function enterLargeMode(info) {
+  state.largeMode = true;
+  const editor = $("editor");
+  editor.value = "";
+  state.prevText = "";
+  editor.hidden = true;
+  const scroll = $("largeScroll");
+  scroll.hidden = false;
+  scroll.scrollTop = 0;
+  scroll.scrollLeft = 0;
+  state.largeFirst = 0;
+  updateLargeSpacer();
+  document.body.classList.add("large-mode");
+  state.wrapDirty = true;
+}
+
+function exitLargeMode() {
+  if (!state.largeMode) return;
+  state.largeMode = false;
+  $("largeScroll").hidden = true;
+  $("largeSpacer").style.height = "0px";
+  $("editor").hidden = false;
+  document.body.classList.remove("large-mode");
+}
+
+function updateLargeSpacer() {
+  if (!state.largeMode || !state.engineReady) return;
+  const total = Math.max(1, state.engine.lineCount) * state.settings.lineHeight;
+  state.largeScaled = total > MAX_SCROLL_PX;
+  $("largeSpacer").style.height = `${Math.min(total, MAX_SCROLL_PX)}px`;
+}
+
+function refreshLargeSpacer() {
+  updateLargeSpacer();
+}
+
+function renderLargeWindow() {
+  const scroll = $("largeScroll");
+  const { lineHeight } = fontSizeMetrics();
+  const scrollTop = scroll.scrollTop;
+  const visible = Math.ceil(scroll.clientHeight / lineHeight) + 2;
+  const total = Math.max(1, state.engine.lineCount);
+  let first;
+  let offsetY;
+  if (state.largeScaled) {
+    // One scrollbar pixel stands for several lines; map the full range.
+    const maxScroll = Math.max(1, scroll.scrollHeight - scroll.clientHeight);
+    const span = Math.max(1, total - visible);
+    first = Math.floor((scrollTop / maxScroll) * span);
+    offsetY = 0;
+  } else {
+    const rowsTop = scrollTop / lineHeight;
+    first = Math.floor(rowsTop);
+    offsetY = scrollTop - first * lineHeight;
+  }
+  first = Math.max(0, Math.min(first, Math.max(0, total - 1)));
+  state.largeFirst = first;
+  const count = Math.max(1, Math.min(visible, total - first));
+  let html;
+  try {
+    html = state.engine.view(first, count, false);
+  } catch (error) {
+    fail("render", error);
+    return;
+  }
+  const hl = $("highlight");
+  hl.style.width = `${scroll.clientWidth}px`;
+  hl.innerHTML = html;
+  hl.style.transform = `translate(0px, ${-offsetY}px)`;
+  renderGutter(first, count);
+  const gutterInner = $("gutter");
+  const shift = document.createElement("div");
+  while (gutterInner.firstChild) shift.appendChild(gutterInner.firstChild);
+  shift.style.transform = `translateY(${-offsetY}px)`;
+  gutterInner.appendChild(shift);
+  updateStatus();
+}
+
 function renderWindow() {
   if (!state.engineReady) return;
+  if (state.largeMode) {
+    renderLargeWindow();
+    return;
+  }
   const editor = $("editor");
   const { lineHeight } = fontSizeMetrics();
   const wrap = !!state.settings.wrap;
@@ -394,6 +501,9 @@ function renderWindow() {
 /* ------------------------------------------------------------- doc sync */
 
 function syncEditorToEngine() {
+  // The large-file view never puts the document into the textarea, so its
+  // empty value must not overwrite the engine buffer.
+  if (state.largeMode) return;
   const editor = $("editor");
   const value = editor.value;
   const old = state.prevText;
@@ -600,6 +710,10 @@ async function addMountFromForm() {
 
 /* ---------------------------------------------------------------- loading */
 
+function isLargeDocument(info) {
+  return info.size > LARGE_FILE_BYTES || info.lineCount > LARGE_FILE_LINES;
+}
+
 async function openPath(path) {
   try {
     const volume = state.volumes.active();
@@ -607,7 +721,15 @@ async function openPath(path) {
     const info = state.engine.load(bytes, path, -1);
     state.path = path;
     state.volume = state.volumes.ref();
-    setEditorText(state.engine.text);
+    const large = isLargeDocument(info);
+    if (large) {
+      // Do not materialise the whole document as a JS string or hand it to
+      // the textarea; keep the engine as the source and paint a window.
+      enterLargeMode(info);
+    } else {
+      exitLargeMode();
+      setEditorText(state.engine.text);
+    }
     // Keep the buffer LF.  Preserve means a CRLF source is written back as
     // CRLF and an LF source stays LF; explicit LF/CRLF remains a user choice.
     state.engine.setEol(1);
@@ -618,10 +740,13 @@ async function openPath(path) {
     state.hexMode = false;
     $("hexWrap").hidden = true;
     $("editorWrap").hidden = false;
-    $("docName").textContent = path;
-    toast(`${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}`);
+    $("docName").textContent = large ? `${path} (view)` : path;
+    toast(
+      `${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}` +
+        (large ? " • large file: read-only partial view" : ""),
+    );
     renderWindow();
-    $("editor").focus();
+    if (!large) $("editor").focus();
   } catch (error) {
     fail("open", error);
   }
@@ -694,6 +819,9 @@ async function refreshFiles() {
           const path = state.volumes.path
             ? `${state.volumes.path}/${entry.name}`
             : entry.name;
+          // A file replaces the editor, so the drawer gets out of the way on
+          // phones.  Selecting a directory keeps it open for the next level.
+          if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
           openPath(path);
         }
       });
@@ -759,6 +887,10 @@ async function newFolder() {
 
 async function saveDocument(saveAs = false) {
   if (!state.engineReady) return;
+  if (state.largeMode) {
+    toast("Large files open in the read-only partial view; edit them with the native CLI.", true);
+    return;
+  }
   if (!state.path || saveAs) {
     const suggested = state.path || "untitled.txt";
     const name = prompt("Save as (path inside the current volume)", suggested);
@@ -801,6 +933,7 @@ function closeDocument() {
     fail("close", error);
     return;
   }
+  exitLargeMode();
   state.path = "";
   state.volume = state.volumes.ref();
   setEditorText("");
@@ -819,11 +952,21 @@ async function openFromFileInput(file) {
     const info = state.engine.load(bytes, file.name, -1);
     state.path = "";
     state.volume = state.volumes.ref();
-    setEditorText(state.engine.text);
+    const large = isLargeDocument(info);
+    if (large) {
+      enterLargeMode(info);
+    } else {
+      exitLargeMode();
+      setEditorText(state.engine.text);
+    }
     state.settings.eol = 0;
     $("statusEol").textContent = EOL_LABELS[0];
     updateDirty(true);
-    toast(`${file.name} • ${info.encodingName} • unsaved buffer`);
+    toast(
+      `${file.name} • ${info.encodingName} • unsaved buffer` +
+        (large ? " • large file: read-only partial view" : ""),
+    );
+    renderWindow();
   } catch (error) {
     fail("open file", error);
   }
@@ -1260,6 +1403,23 @@ function replaceAll() {
 }
 
 function goToLine() {
+  if (state.largeMode) {
+    const text = prompt("Go to line", String(state.largeFirst + 1));
+    if (!text) return;
+    const wanted = Math.max(1, Math.min(state.engine.lineCount, parseInt(text, 10) || 1));
+    const scroll = $("largeScroll");
+    const { lineHeight } = fontSizeMetrics();
+    const visible = Math.ceil(scroll.clientHeight / lineHeight) + 2;
+    if (state.largeScaled) {
+      const maxScroll = Math.max(1, scroll.scrollHeight - scroll.clientHeight);
+      const span = Math.max(1, state.engine.lineCount - visible);
+      scroll.scrollTop = Math.floor(((wanted - 1) / span) * maxScroll);
+    } else {
+      scroll.scrollTop = (wanted - 1) * lineHeight;
+    }
+    updateHighlight();
+    return;
+  }
   const text = prompt("Go to line", String($("editor").value.slice(0, $("editor").selectionStart).split("\n").length));
   if (!text) return;
   const wanted = Math.max(1, parseInt(text, 10) || 1);
@@ -1445,6 +1605,7 @@ function bindEvents() {
     }
   });
   editor.addEventListener("scroll", rerender, { passive: true });
+  $("largeScroll").addEventListener("scroll", () => updateHighlight(), { passive: true });
   editor.addEventListener("keyup", updateStatus);
   editor.addEventListener("click", updateStatus);
   editor.addEventListener("select", updateStatus);
