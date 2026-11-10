@@ -565,6 +565,8 @@ fi::io_async_task<> api_file(fi::io_async_observer sched, fi::u8iobuf_socket_fil
 		body.resize(req.content_length);
 		if (req.content_length != 0)
 		{
+			// This is the HTTP request body on the socket, not a filesystem
+			// read; file responses use native_file_loader below.
 			co_await fop::async_pread_all_bytes(
 				sched, {}, sock, reinterpret_cast<::std::byte *>(body.data()), body.size(), {});
 		}
