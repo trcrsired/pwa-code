@@ -443,17 +443,17 @@ export class Volumes {
     this.current = "internal";
     // One remembered selection per family, so switching tabs never applies an
     // external mount id to the remote volume (the ids are independent).
-    this.mounts = { external: "", remote: "" };
+    this.selected = { external: "", remote: "" };
     this.path = "";
   }
 
   get mount() {
-    return this.current === "internal" ? "" : this.mounts[this.current];
+    return this.current === "internal" ? "" : this.selected[this.current];
   }
 
   set mount(id) {
     if (this.current === "internal") return;
-    this.mounts[this.current] = id || "";
+    this.selected[this.current] = id || "";
   }
 
   async init(remoteBase) {
@@ -501,7 +501,7 @@ export class Volumes {
     if (!ref || ref === "internal") return this.internal;
     const colon = ref.indexOf(":");
     const kind = colon < 0 ? ref : ref.slice(0, colon);
-    const id = colon < 0 ? this.mounts[kind] : ref.slice(colon + 1);
+    const id = colon < 0 ? this.selected[kind] : ref.slice(colon + 1);
     const map = kind === "external" ? this.externalMounts : kind === "remote" ? this.remoteMounts : null;
     const volume = map ? map.get(id) : null;
     if (!volume) throw new Error(`Mount "${id || kind}" is not available. Mount it again.`);
@@ -512,15 +512,15 @@ export class Volumes {
     if (this.current === "internal") return this.internal;
     const map = this.current === "external" ? this.externalMounts : this.remoteMounts;
     if (map.size === 0) throw new Error(`No ${this.current} mount yet.`);
-    const id = this.mounts[this.current];
+    const id = this.selected[this.current];
     const volume = (id && map.get(id)) || map.values().next().value;
     if (!volume) throw new Error(`No ${this.current} mount selected.`);
-    if (!id) this.mounts[this.current] = volume.id;
+    if (!id) this.selected[this.current] = volume.id;
     return volume;
   }
 
   ref() {
-    return this.current === "internal" ? "internal" : `${this.current}:${this.mounts[this.current]}`;
+    return this.current === "internal" ? "internal" : `${this.current}:${this.selected[this.current]}`;
   }
 
   mounts(kind) {
@@ -553,7 +553,7 @@ export class Volumes {
     const base = (handle && handle.name) || "external";
     const id = uniqueName(base, new Set(this.externalMounts.keys()));
     this.externalMounts.set(id, new ExternalVolume(id, id, handle));
-    this.mounts.external = id;
+    this.selected.external = id;
     await this.persistExternal();
     return id;
   }
@@ -568,7 +568,7 @@ export class Volumes {
     if (!base) throw new Error("Remote URL is required.");
     const id = uniqueName(label, new Set(this.remoteMounts.keys()));
     this.remoteMounts.set(id, new RemoteVolume(id, label, base, mode));
-    this.mounts.remote = id;
+    this.selected.remote = id;
     await this.persistRemote();
     return id;
   }
@@ -581,8 +581,8 @@ export class Volumes {
       this.remoteMounts.delete(id);
       await this.persistRemote();
     }
-    if (this.mounts[kind] === id) {
-      this.mounts[kind] = "";
+    if (this.selected[kind] === id) {
+      this.selected[kind] = "";
       this.path = "";
     }
   }
