@@ -445,7 +445,7 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
 .highlight .lc { white-space: pre; }
 
 /* Wrapped rendering: logical lines may occupy several visual rows. */
-body.wrap-mode .highlight { box-sizing: border-box; }
+body.wrap-mode .highlight { box-sizing: border-box; width: 100%; }
 body.wrap-mode .highlight .vl {
   height: auto;
   min-height: var(--line-height);
@@ -464,6 +464,7 @@ body.wrap-mode .editor {
   position: absolute;
   left: 0;
   top: 0;
+  width: 100%;
   visibility: hidden;
   pointer-events: none;
   z-index: -1;
@@ -477,6 +478,7 @@ body.wrap-mode .editor {
   overflow-wrap: anywhere;
 }
 .wrap-measure > div {
+  min-height: var(--line-height);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

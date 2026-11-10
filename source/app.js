@@ -48,10 +48,11 @@ const state = {
   softMods: { ctrl: false, alt: false },
   autoSaveTimer: 0,
   engineReady: false,
-  wrapOffsets: [0],
-  wrapHeights: [],
+  wrapRows: null,
+  wrapLines: null,
+  wrapKey: "",
+  wrapOffsets: null,
   wrapDirty: true,
-  wrapTimer: 0,
 };
 
 /* --------------------------------------------------------------- helpers */
@@ -118,13 +119,12 @@ function applySettings() {
   wrapBtn.classList.toggle("on", !!s.wrap);
   wrapBtn.setAttribute("aria-pressed", String(!!s.wrap));
   if (!s.wrap) {
-    state.wrapOffsets = [0];
-    state.wrapHeights = [];
-    state.wrapDirty = true;
+    state.wrapRows = null;
+    state.wrapLines = null;
+    state.wrapOffsets = null;
     $("highlight").style.width = "";
-  } else {
-    state.wrapDirty = true;
   }
+  state.wrapDirty = true;
   $("statusEncoding").textContent = ENCODINGS[
     state.engineReady ? state.engine.encoding : s.encoding
   ] || "UTF-8";
@@ -208,7 +208,9 @@ function renderGutter(first, count) {
     div.className = "gl";
     div.dataset.line = String(n);
     div.textContent = String(n + 1);
-    div.style.height = `${lineHeight}px`;
+    // In wrap mode a logical line owns as many visual rows as it wraps into,
+    // so the number sits at the top of its block.
+    div.style.height = `${(state.settings.wrap ? wrapRowsOf(n) : 1) * lineHeight}px`;
     div.style.lineHeight = `${lineHeight}px`;
     frag.appendChild(div);
   }
@@ -229,15 +231,138 @@ function updateHighlight() {
   });
 }
 
+/* ------------------------------------------------------------ wrap layout */
+
+// In wrap mode one logical line can occupy several visual rows, so the
+// highlight offset and the gutter heights need a per-line row count.  Every
+// line wraps on its own, so the table is rebuilt by re-measuring only the
+// lines an edit actually touched.
+const WRAP_MAP_LIMIT = 20000;
+
+function wrapMeasureEl() {
+  let el = $("wrapMeasure");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "wrapMeasure";
+    el.className = "wrap-measure";
+    el.setAttribute("aria-hidden", "true");
+    $("editorWrap").appendChild(el);
+  }
+  return el;
+}
+
+function measureWrapRows(lines) {
+  const { lineHeight } = fontSizeMetrics();
+  const editor = $("editor");
+  const el = wrapMeasureEl();
+  // The textarea loses 11px to its scrollbar when the document overflows, so
+  // the mirror has to use the textarea's real content width, not 100%.
+  if (editor.clientWidth > 0) el.style.width = `${editor.clientWidth}px`;
+  el.textContent = "";
+  const frag = document.createDocumentFragment();
+  for (const text of lines) {
+    // An empty line still needs a line box, hence the nbsp.
+    const div = document.createElement("div");
+    div.textContent = text.length ? text : "\u00a0";
+    frag.appendChild(div);
+  }
+  el.appendChild(frag);
+  const rows = new Uint16Array(lines.length);
+  const children = el.children;
+  for (let i = 0; i < children.length; i++) {
+    const height = children[i].getBoundingClientRect().height;
+    rows[i] = Math.max(1, Math.round(height / lineHeight) || 1);
+  }
+  el.textContent = "";
+  return rows;
+}
+
+function refreshWrapRows() {
+  const editor = $("editor");
+  // A hidden editor has no layout to measure; stay dirty until it comes back.
+  if (!editor.clientWidth || !editor.clientHeight) return;
+  const lines = editor.value.split("\n");
+  if (lines.length > WRAP_MAP_LIMIT) {
+    state.wrapRows = null;
+    state.wrapLines = null;
+    state.wrapOffsets = null;
+    state.wrapDirty = false;
+    return;
+  }
+  const old = state.wrapLines;
+  // Wrapping depends on the text, the width and the font metrics; a change to
+  // any of them invalidates the whole table, not just the edited lines.
+  const key = `${editor.clientWidth}x${state.settings.fontSize}x${state.settings.lineHeight}`;
+  const sameLayout = state.wrapKey === key;
+  let rows;
+  if (!old || !state.wrapRows || !sameLayout) {
+    rows = measureWrapRows(lines);
+  } else {
+    const min = Math.min(old.length, lines.length);
+    let prefix = 0;
+    while (prefix < min && old[prefix] === lines[prefix]) prefix++;
+    let suffix = 0;
+    while (suffix < min - prefix && old[old.length - 1 - suffix] === lines[lines.length - 1 - suffix]) {
+      suffix++;
+    }
+    if (old.length === lines.length && prefix === min) {
+      state.wrapDirty = false;
+      return; // same text and layout, the table is still valid
+    }
+    const middle = measureWrapRows(lines.slice(prefix, lines.length - suffix));
+    rows = new Uint16Array(lines.length);
+    rows.set(state.wrapRows.subarray(0, prefix), 0);
+    rows.set(middle, prefix);
+    rows.set(state.wrapRows.subarray(old.length - suffix), lines.length - suffix);
+  }
+  state.wrapRows = rows;
+  state.wrapLines = lines;
+  state.wrapKey = key;
+  const offsets = new Int32Array(rows.length + 1);
+  for (let i = 0; i < rows.length; i++) offsets[i + 1] = offsets[i] + rows[i];
+  state.wrapOffsets = offsets;
+  state.wrapDirty = false;
+}
+
+// Greatest logical line whose first visual row is at or above `row`.
+function wrapLineAtRow(row) {
+  const offsets = state.wrapOffsets;
+  const last = Math.max(0, state.engine.lineCount - 1);
+  if (!offsets) return Math.min(last, Math.max(0, Math.floor(row)));
+  let lo = 0;
+  let hi = Math.min(offsets.length - 1, last);
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (offsets[mid] <= row) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+function wrapRowsOf(line) {
+  const offsets = state.wrapOffsets;
+  if (!offsets || line + 1 >= offsets.length) return 1;
+  return Math.max(1, offsets[line + 1] - offsets[line]);
+}
+
 function renderWindow() {
   if (!state.engineReady) return;
   const editor = $("editor");
   const { lineHeight } = fontSizeMetrics();
+  const wrap = !!state.settings.wrap;
+  if (wrap && (state.wrapDirty || !state.wrapOffsets)) refreshWrapRows();
   const scrollTop = editor.scrollTop;
   const scrollLeft = editor.scrollLeft;
-  const first = Math.max(0, Math.floor(scrollTop / lineHeight));
-  const visible = Math.ceil(editor.clientHeight / lineHeight) + 2;
-  const count = Math.max(1, Math.min(visible, state.engine.lineCount - first));
+  const rowsTop = scrollTop / lineHeight;
+  const rowsVisible = Math.ceil(editor.clientHeight / lineHeight) + 2;
+  const first = wrap ? wrapLineAtRow(rowsTop) : Math.max(0, Math.floor(rowsTop));
+  let count;
+  if (wrap && state.wrapOffsets) {
+    const last = wrapLineAtRow(rowsTop + rowsVisible);
+    count = Math.max(1, Math.min(last - first + 1, state.engine.lineCount - first));
+  } else {
+    count = Math.max(1, Math.min(rowsVisible, state.engine.lineCount - first));
+  }
   let html;
   try {
     html = state.engine.view(first, count, false);
@@ -246,17 +371,22 @@ function renderWindow() {
     return;
   }
   const hl = $("highlight");
+  if (wrap && editor.clientWidth > 0) hl.style.width = `${editor.clientWidth}px`;
   hl.innerHTML = html;
-  const offsetY = scrollTop - first * lineHeight;
+  const top =
+    wrap && state.wrapOffsets && state.wrapOffsets[first] !== undefined
+      ? state.wrapOffsets[first] * lineHeight
+      : first * lineHeight;
+  const offsetY = scrollTop - top;
   hl.style.transform = `translate(${-scrollLeft}px, ${-offsetY}px)`;
   renderGutter(first, count);
   const gutterInner = $("gutter");
   gutterInner.style.transform = "";
   // Shift the small rendered gutter window by the same sub-line amount.
-  const wrap = document.createElement("div");
-  while (gutterInner.firstChild) wrap.appendChild(gutterInner.firstChild);
-  wrap.style.transform = `translateY(${-offsetY}px)`;
-  gutterInner.appendChild(wrap);
+  const wrapEl = document.createElement("div");
+  while (gutterInner.firstChild) wrapEl.appendChild(gutterInner.firstChild);
+  wrapEl.style.transform = `translateY(${-offsetY}px)`;
+  gutterInner.appendChild(wrapEl);
   updateStatus();
   if (state.hexMode) return;
 }
@@ -304,6 +434,7 @@ function setEditorText(text) {
   state.prevText = text;
   editor.scrollTop = 0;
   editor.scrollLeft = 0;
+  state.wrapDirty = true;
   updateHighlight();
   updateStatus();
 }
@@ -730,6 +861,7 @@ function closeHex() {
   state.hexMode = false;
   $("hexWrap").hidden = true;
   $("editorWrap").hidden = false;
+  state.wrapDirty = true;
   renderWindow();
 }
 
@@ -778,6 +910,7 @@ function hexApply() {
   try {
     state.engine.hexPatch(offset, value);
     state.hexSelected = offset + 1;
+    state.wrapDirty = true;
     renderHex();
     toast(`byte ${offset.toString(16).padStart(8, "0")} = ${(value & 0xff).toString(16).toUpperCase().padStart(2, "0")}`);
   } catch (error) {
@@ -928,6 +1061,14 @@ function sendTerminalKey(key, mods) {
 
 /* --------------------------------------------------------- soft keyboard */
 
+function toggleWrap() {
+  state.settings.wrap = !state.settings.wrap;
+  saveSettings();
+  applySettings();
+  updateHighlight();
+  toast(`line wrap: ${state.settings.wrap ? "on" : "off"}`);
+}
+
 function toggleSoftKeyboard(show) {
   const kb = $("softKeyboard");
   const visible = show ?? kb.hidden;
@@ -1061,7 +1202,13 @@ function revealSelection() {
   const before = value.slice(0, editor.selectionStart);
   const line = before.split("\n").length - 1;
   const lineHeight = state.settings.lineHeight;
-  const top = line * lineHeight;
+  if (state.settings.wrap && state.wrapOffsets) {
+    if (state.wrapDirty) refreshWrapRows();
+  }
+  const top =
+    state.settings.wrap && state.wrapOffsets
+      ? state.wrapOffsets[Math.min(line, state.wrapOffsets.length - 1)] * lineHeight
+      : line * lineHeight;
   if (top < editor.scrollTop || top + lineHeight > editor.scrollTop + editor.clientHeight) {
     editor.scrollTop = Math.max(0, top - editor.clientHeight / 3);
     updateHighlight();
@@ -1133,6 +1280,7 @@ function populateSettingsForm() {
   $("setFontSize").value = String(s.fontSize);
   $("setLineHeight").value = String(s.lineHeight);
   $("setLineNumbers").checked = s.lineNumbers;
+  $("setWrap").checked = s.wrap;
   $("setSoftKeyboard").checked = s.softKeyboard;
   $("setIndent").value = String(s.indent);
   $("setAutoSave").checked = s.autoSave;
@@ -1161,6 +1309,7 @@ async function applySettingsForm() {
   s.fontSize = Math.max(9, Math.min(32, Number($("setFontSize").value) || 13));
   s.lineHeight = Math.max(s.fontSize + 2, Math.min(48, Number($("setLineHeight").value) || 20));
   s.lineNumbers = $("setLineNumbers").checked;
+  s.wrap = $("setWrap").checked;
   s.softKeyboard = $("setSoftKeyboard").checked;
   s.indent = Number($("setIndent").value) || 0;
   s.autoSave = $("setAutoSave").checked;
@@ -1172,6 +1321,7 @@ async function applySettingsForm() {
   s.termLocalEcho = $("setTermLocalEcho").checked;
   saveSettings();
   applySettings();
+  updateHighlight();
   if (s.remoteBase) {
     try {
       await state.volumes.syncDefaultRemote(s.remoteBase);
@@ -1287,6 +1437,7 @@ function bindEvents() {
   editor.addEventListener("input", () => {
     syncEditorToEngine();
     updateDirty(true);
+    state.wrapDirty = true;
     rerender();
     if (state.settings.autoSave && state.path) {
       clearTimeout(state.autoSaveTimer);
@@ -1337,6 +1488,9 @@ function bindEvents() {
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "g") {
       event.preventDefault();
       goToLine();
+    } else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "z") {
+      event.preventDefault();
+      toggleWrap();
     } else if (event.key === "Escape" && !$("findBar").hidden) {
       closeFind();
     }
@@ -1449,12 +1603,17 @@ function bindEvents() {
     }
   });
   window.addEventListener("resize", () => {
+    state.wrapDirty = true;
     updateHighlight();
     if (state.hexMode) renderHex();
     if (state.term && !$("termWrap").hidden) resizeTerminal();
   });
   if (window.ResizeObserver) {
-    new ResizeObserver(() => updateHighlight()).observe($("viewport"));
+    // A width change re-wraps every line, so the measured table is stale too.
+    new ResizeObserver(() => {
+      state.wrapDirty = true;
+      updateHighlight();
+    }).observe($("viewport"));
   }
 
   $("fileInput").addEventListener("change", () => {
@@ -1580,6 +1739,8 @@ function bindEvents() {
     saveSettings();
     applySettings();
   });
+
+  $("statusWrap").addEventListener("click", toggleWrap);
 
   $("statusEncoding").addEventListener("click", () => {
     if (!state.engineReady) return;
