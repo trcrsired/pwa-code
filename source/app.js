@@ -584,6 +584,36 @@ async function saveDocument(saveAs = false) {
   }
 }
 
+/* ------------------------------------------------------------------ close */
+
+// Ctrl+W asks for a tab to go away, not for the whole installed app to be
+// torn down with its session, mounts and terminal.  The document is the one
+// tab here, so closing it drops the buffer back to an empty "untitled".
+function closeDocument() {
+  if (!state.engineReady) return;
+  const name = state.path || "untitled";
+  if (state.dirty && !confirm(`Discard unsaved changes to ${name}?`)) return;
+  if (state.hexMode) {
+    state.hexMode = false;
+    $("hexWrap").hidden = true;
+    $("editorWrap").hidden = false;
+  }
+  try {
+    state.engine.setText("");
+  } catch (error) {
+    fail("close", error);
+    return;
+  }
+  state.path = "";
+  state.volume = state.volumes.ref();
+  setEditorText("");
+  state.settings.eol = 0;
+  $("statusEol").textContent = EOL_LABELS[0];
+  $("docName").textContent = "untitled";
+  updateDirty(false);
+  toast(`closed ${name}`);
+}
+
 /* ------------------------------------------------------------ open files */
 
 async function openFromFileInput(file) {
@@ -1440,6 +1470,34 @@ function bindEvents() {
     updateDirty(true);
     toast(`line endings: ${EOL_LABELS[state.settings.eol]}`);
   });
+
+  // Close chords are captured before the browser sees them.  Inside an
+  // installed PWA Ctrl+W would otherwise take the whole window down; here it
+  // closes the frontmost thing instead, and the terminal keeps its ^W
+  // word-delete because its own handler still receives the key.
+  window.addEventListener(
+    "keydown",
+    (event) => {
+      const closeChord =
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        (event.key === "w" || event.key === "W" || event.key === "F4");
+      if (!closeChord) return;
+      event.preventDefault();
+      if (!$("settingsModal").hidden) {
+        $("settingsModal").hidden = true;
+        return;
+      }
+      if (!$("mountModal").hidden) {
+        $("mountModal").hidden = true;
+        return;
+      }
+      const term = $("term");
+      if (!$("termWrap").hidden && term.contains(document.activeElement)) return;
+      closeDocument();
+    },
+    true,
+  );
 
   window.addEventListener("beforeunload", (event) => {
     if (state.dirty) {
