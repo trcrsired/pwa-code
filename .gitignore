@@ -1,0 +1,6 @@
+# Native build outputs
+/pwacode-server
+/pwacode-cli
+
+# Node tooling
+node_modules/

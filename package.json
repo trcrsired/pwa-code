@@ -1,0 +1,14 @@
+{
+  "name": "pwa-code-build",
+  "private": true,
+  "type": "module",
+  "description": "Build tooling for pwa code; not shipped to the browser.",
+  "scripts": {
+    "build:web": "node build/build-web.mjs"
+  },
+  "devDependencies": {
+    "clean-css": "^5.3.3",
+    "html-minifier-terser": "^7.2.0",
+    "terser": "^5.44.0"
+  }
+}
