@@ -362,7 +362,11 @@ fi::u8string query_path(fi::u8string_view query) throws
 inline constexpr char8_t cors_text[]{
 	u8"Access-Control-Allow-Origin: *\r\n"
 	u8"Access-Control-Allow-Methods: GET, HEAD, PUT, OPTIONS\r\n"
-	u8"Access-Control-Allow-Headers: Content-Type\r\n"
+	u8"Access-Control-Allow-Headers: Content-Type, Access-Control-Request-Private-Network\r\n"
+	// A PWA served from a public origin (GitHub Pages) may mount a server on
+	// the user's LAN or loopback.  Chrome's Private Network Access preflight
+	// only succeeds when the private endpoint opts in.
+	u8"Access-Control-Allow-Private-Network: true\r\n"
 	u8"Access-Control-Max-Age: 86400\r\n"};
 
 inline fi::u8string_view cors_headers() noexcept
