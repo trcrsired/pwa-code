@@ -359,6 +359,43 @@ body.softkb #app { padding-bottom: 94px; }
 }
 .highlight .lc { white-space: pre; }
 
+/* Wrapped rendering: logical lines may occupy several visual rows. */
+body.wrap-mode .highlight { box-sizing: border-box; }
+body.wrap-mode .highlight .vl {
+  height: auto;
+  min-height: var(--line-height);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body.wrap-mode .highlight .lc {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+body.wrap-mode .editor {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wrap-measure {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+  box-sizing: border-box;
+  padding: 0 var(--pad-x);
+  font-family: var(--mono);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wrap-measure > div {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .editor {
   position: absolute;
   inset: 0;
@@ -533,6 +570,7 @@ body[data-theme="light"] .ansi-white { color: #333; }
   font-size: 11.5px;
 }
 .status-btn:hover { color: var(--fg); background: var(--hover); }
+.status-btn.on, .status-btn[aria-pressed="true"] { color: var(--accent); }
 
 /* ---------------------------------------------------------- soft keys */
 
@@ -602,6 +640,9 @@ body[data-theme="light"] .ansi-white { color: #333; }
   gap: 4px 22px;
 }
 .modal-body section { padding: 4px 0 10px; }
+.modal-body.single { grid-template-columns: 1fr; }
+.modal-card.narrow { width: min(520px, 100%); }
+.mount-help { color: var(--muted); font-size: 11.5px; line-height: 1.5; margin: 8px 0 0; }
 .modal-body h3 {
   margin: 8px 0 8px;
   font-size: 12px;

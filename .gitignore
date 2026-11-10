@@ -1,6 +1,7 @@
 # Native build outputs
 /pwacode-server
 /pwacode-cli
+/.ignores
 
 # Node tooling
 node_modules/

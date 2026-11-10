@@ -19,6 +19,7 @@ const DEFAULT_SETTINGS = {
   softKeyboard: false,
   indent: 0,
   autoSave: false,
+  wrap: false,
   bracketColor: true,
   encoding: 0,
   eol: 0,
@@ -46,6 +47,10 @@ const state = {
   softMods: { ctrl: false, alt: false },
   autoSaveTimer: 0,
   engineReady: false,
+  wrapOffsets: [0],
+  wrapHeights: [],
+  wrapDirty: true,
+  wrapTimer: 0,
 };
 
 /* --------------------------------------------------------------- helpers */
@@ -98,12 +103,27 @@ function applySettings() {
   const s = state.settings;
   document.body.dataset.theme = s.theme === "light" ? "light" : "dark";
   document.body.classList.toggle("no-bracket-color", !s.bracketColor);
+  document.body.classList.toggle("wrap-mode", !!s.wrap);
   document.documentElement.style.setProperty("--font-size", `${s.fontSize}px`);
   document.documentElement.style.setProperty("--line-height", `${s.lineHeight}px`);
   document.documentElement.style.setProperty("--gutter-w", s.lineNumbers ? "" : "0px");
   $("gutter").hidden = !s.lineNumbers;
   const kb = $("softKeyboard");
   if (kb) kb.hidden = !s.softKeyboard;
+  const editor = $("editor");
+  editor.wrap = s.wrap ? "soft" : "off";
+  const wrapBtn = $("statusWrap");
+  wrapBtn.textContent = s.wrap ? "Wrap: on" : "Wrap: off";
+  wrapBtn.classList.toggle("on", !!s.wrap);
+  wrapBtn.setAttribute("aria-pressed", String(!!s.wrap));
+  if (!s.wrap) {
+    state.wrapOffsets = [0];
+    state.wrapHeights = [];
+    state.wrapDirty = true;
+    $("highlight").style.width = "";
+  } else {
+    state.wrapDirty = true;
+  }
   $("statusEncoding").textContent = ENCODINGS[
     state.engineReady ? state.engine.encoding : s.encoding
   ] || "UTF-8";

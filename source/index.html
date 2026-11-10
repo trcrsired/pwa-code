@@ -47,7 +47,8 @@
       <div id="pathBar" class="path-bar">/</div>
       <div id="fileList" class="file-list" role="listbox"></div>
       <div class="side-foot">
-        <button id="pickExternalBtn" class="mini-btn wide">Choose external folder</button>
+        <button id="pickExternalBtn" class="mini-btn wide">Mount external folder</button>
+        <button id="addRemoteBtn" class="mini-btn wide" hidden>Add remote mount</button>
         <div id="volStatus" class="vol-status"></div>
       </div>
     </aside>
@@ -111,6 +112,7 @@
     <span class="spacer"></span>
     <button id="statusEncoding" class="status-btn" title="Change encoding">UTF-8</button>
     <button id="statusEol" class="status-btn" title="Change line endings">LF</button>
+    <button id="statusWrap" class="status-btn" title="Toggle line wrap (Alt+Z)" aria-pressed="false">Wrap: off</button>
     <span id="statusLang">plain</span>
     <span id="statusSize">0 B</span>
     <span id="statusWasm">engine</span>
@@ -137,6 +139,36 @@
     <button data-key="Backspace" class="sk-key wide">⌫</button>
     <button data-key="Enter" class="sk-key wide accent">Enter</button>
     <button id="skHide" class="sk-key">Hide</button>
+  </div>
+</div>
+
+<div id="mountModal" class="modal" hidden>
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <h2>Add remote mount</h2>
+      <button id="mountClose" class="icon-btn" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body single">
+      <label class="row">Name
+        <input id="mountName" type="text" placeholder="Build server" autocomplete="off">
+      </label>
+      <label class="row">URL
+        <input id="mountUrl" type="url" placeholder="http://127.0.0.1:8140" autocomplete="off">
+      </label>
+      <label class="row">Type
+        <select id="mountMode">
+          <option value="auto">Auto detect</option>
+          <option value="server">pwa-code server</option>
+          <option value="http">HTTP directory (read-only)</option>
+        </select>
+      </label>
+      <p class="mount-help">HTTP mounts parse a normal directory index and are read-only. A pwa-code server mount also supports saving and the WebSocket terminal.</p>
+    </div>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button id="mountCancel" class="tool-btn">Cancel</button>
+      <button id="mountAdd" class="tool-btn primary">Add mount</button>
+    </div>
   </div>
 </div>
 
@@ -167,6 +199,7 @@
           <select id="setIndent"><option value="0">2 spaces</option><option value="1">Tab</option></select>
         </label>
         <label class="row check"><input id="setAutoSave" type="checkbox"> Auto save after edits</label>
+        <label class="row check"><input id="setWrap" type="checkbox"> Wrap long lines</label>
         <label class="row check"><input id="setBracketColor" type="checkbox"> Colour brackets by depth</label>
         <label class="row">Default encoding
           <select id="setEncoding"></select>
