@@ -31,13 +31,19 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdlib.h>
 
+#if defined(_WIN32)
+// The win32 surface (kernel32 declarations, HANDLE observers, IOCP async) is
+// already provided by fast_io; only the ConPTY entry points are missing and are
+// resolved through GetProcAddress below.
+#else
 #include <fcntl.h>
 #include <signal.h>
-#include <stdlib.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace fi = ::fast_io;
 namespace fop = ::fast_io::operations;
@@ -350,13 +356,39 @@ fi::u8string query_path(fi::u8string_view query) throws
 
 /* ---------------------------- responses ----------------------------- */
 
+// Remote mounts are fetched by a browser that may be served from another
+// origin (GitHub Pages, a file:// snapshot, another machine), so every response
+// carries permissive CORS headers and OPTIONS preflights are answered directly.
+inline constexpr char8_t cors_text[]{
+	u8"Access-Control-Allow-Origin: *\r\n"
+	u8"Access-Control-Allow-Methods: GET, HEAD, PUT, OPTIONS\r\n"
+	u8"Access-Control-Allow-Headers: Content-Type\r\n"
+	u8"Access-Control-Max-Age: 86400\r\n"};
+
+inline fi::u8string_view cors_headers() noexcept
+{
+	return fi::u8string_view{cors_text, sizeof(cors_text) - 1};
+}
+
+fi::io_async_task<> send_preflight(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+								   request const &req) throws
+{
+	co_await fi::io::async_print(
+		sched, {}, sock, u8"HTTP/1.1 204 No Content\r\n", cors_headers(),
+		u8"Content-Length: 0\r\nConnection: ",
+		req.keep_alive ? fi::u8string_view{u8"keep-alive"} : fi::u8string_view{u8"close"},
+		u8"\r\n\r\n");
+	co_await fop::async_output_stream_flush(sched, {}, sock);
+}
+
 fi::io_async_task<> send_simple(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
 								unsigned code, fi::u8string_view phrase, fi::u8string_view body,
 								request const &req, bool close) throws
 {
 	co_await fi::io::async_print(
 		sched, {}, sock, u8"HTTP/1.1 ", code, u8" ", phrase,
-		u8"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ", body.size(),
+		u8"\r\nContent-Type: text/plain; charset=utf-8\r\n", cors_headers(),
+		u8"Content-Length: ", body.size(),
 		u8"\r\nConnection: ", (close || !req.keep_alive) ? fi::u8string_view{u8"close"}
 														: fi::u8string_view{u8"keep-alive"},
 		u8"\r\n\r\n");
@@ -373,8 +405,8 @@ fi::io_async_task<> send_json(fi::io_async_observer sched, fi::u8iobuf_socket_fi
 {
 	co_await fi::io::async_print(
 		sched, {}, sock, u8"HTTP/1.1 ", code, u8" ", phrase,
-		u8"\r\nContent-Type: application/json; charset=utf-8"
-		u8"\r\nCache-Control: no-store\r\nContent-Length: ", json.size(),
+		u8"\r\nContent-Type: application/json; charset=utf-8\r\n", cors_headers(),
+		u8"Cache-Control: no-store\r\nContent-Length: ", json.size(),
 		u8"\r\nConnection: ",
 		req.keep_alive ? fi::u8string_view{u8"keep-alive"} : fi::u8string_view{u8"close"},
 		u8"\r\n\r\n");
@@ -441,8 +473,8 @@ fi::io_async_task<> serve_static(fi::io_async_observer sched, fi::u8iobuf_socket
 	}
 	co_await fi::io::async_print(
 		sched, {}, sock, u8"HTTP/1.1 200 OK\r\nContent-Type: ", mime_of(sv(path)),
-		u8"\r\nContent-Length: ", length, sv(encoding_header),
-		u8"\r\nCache-Control: no-cache"
+		u8"\r\nContent-Length: ", length, sv(encoding_header), u8"\r\n", cors_headers(),
+		u8"Cache-Control: no-cache"
 		u8"\r\nService-Worker-Allowed: /\r\nConnection: ",
 		req.keep_alive ? fi::u8string_view{u8"keep-alive"} : fi::u8string_view{u8"close"},
 		u8"\r\n\r\n");
@@ -549,7 +581,7 @@ fi::io_async_task<> api_file(fi::io_async_observer sched, fi::u8iobuf_socket_fil
 		auto const st{fi::status(f)};
 		co_await fi::io::async_print(
 			sched, {}, sock, u8"HTTP/1.1 200 OK\r\nContent-Type: ", mime_of(sv(decoded.path)),
-			u8"\r\nCache-Control: no-store\r\nContent-Length: ", st.size,
+			u8"\r\nCache-Control: no-store\r\n", cors_headers(), u8"Content-Length: ", st.size,
 			u8"\r\nConnection: ",
 			req.keep_alive ? fi::u8string_view{u8"keep-alive"} : fi::u8string_view{u8"close"},
 			u8"\r\n\r\n");
@@ -718,9 +750,335 @@ fi::io_async_task<> ws_send_frame(fi::io_async_observer sched, auto out,
 	}
 }
 
+/* --------------------------- child process --------------------------- */
+
+// A shell attached to a pseudo terminal.  POSIX forks a pty(4) slave; Windows
+// opens a ConPTY whose ends are overlapped named pipes, so the same async pump
+// reads console output and writes keystrokes.  Nothing here blocks and nothing
+// spawns a thread: the IOCP scheduler owns both directions.
+struct terminal_process
+{
+#if defined(_WIN32)
+	void *process{};
+	void *console{};
+	void *input{};
+	void *output{};
+#else
+	pid_t child{};
+	fi::u8posix_file master{};
+#endif
+};
+
 // Fork the shell onto a PTY.  Every syscall that can fail uses errno only to
 // build the herbception; no caller ever sees an error code.
-fi::u8posix_file spawn_pty(fi::u8string_view shell, pid_t &child) throws
+#if defined(_WIN32)
+
+namespace win32 = ::fast_io::win32;
+
+// kernel32 does not surface PeekNamedPipe through fast_io; the console pump only
+// needs the byte count, so declare the one entry point it uses.
+extern "C" __declspec(dllimport) int __stdcall PeekNamedPipe(
+	void *, void *, ::std::uint_least32_t, ::std::uint_least32_t *, ::std::uint_least32_t *,
+	::std::uint_least32_t *) noexcept;
+
+constexpr ::std::uint_least32_t pipe_access_inbound{0x00000001u};
+constexpr ::std::uint_least32_t pipe_access_outbound{0x00000002u};
+constexpr ::std::uint_least32_t file_flag_overlapped{0x40000000u};
+constexpr ::std::uint_least32_t generic_read{0x80000000u};
+constexpr ::std::uint_least32_t generic_write{0x40000000u};
+constexpr ::std::uint_least32_t extended_startupinfo_present{0x00080000u};
+constexpr ::std::size_t proc_thread_attribute_pseudoconsole{0x00020016u};
+inline void *invalid_handle_value() noexcept
+{
+	return reinterpret_cast<void *>(static_cast<::std::intptr_t>(-1));
+}
+
+struct win32_coord
+{
+	::std::int_least16_t x;
+	::std::int_least16_t y;
+};
+
+struct startupinfoex_w
+{
+	win32::startupinfow startup;
+	void *attributes;
+};
+
+// ConPTY exists on Windows 10 1809+.  Resolving the entry points dynamically
+// keeps the server loadable on older systems; the terminal then reports that it
+// is unavailable instead of the binary failing to load.
+struct conpty_api
+{
+	long(__stdcall *create)(win32_coord, void *, void *, ::std::uint_least32_t, void **);
+	long(__stdcall *resize)(void *, win32_coord);
+	void(__stdcall *close_console)(void *);
+	int(__stdcall *init_attributes)(void *, ::std::uint_least32_t, ::std::uint_least32_t,
+									::std::size_t *);
+	int(__stdcall *update_attribute)(void *, ::std::uint_least32_t, ::std::size_t, void *,
+									 ::std::size_t, void *, ::std::size_t *);
+	void(__stdcall *delete_attributes)(void *);
+};
+
+conpty_api load_conpty_api() throws
+{
+	void *const module{win32::GetModuleHandleW(u"kernel32.dll")};
+	if (module == nullptr)
+	{
+		::fast_io::throw_win32_error();
+	}
+	conpty_api api{};
+	api.create = reinterpret_cast<decltype(api.create)>(
+		win32::GetProcAddress(module, "CreatePseudoConsole"));
+	api.resize = reinterpret_cast<decltype(api.resize)>(
+		win32::GetProcAddress(module, "ResizePseudoConsole"));
+	api.close_console = reinterpret_cast<decltype(api.close_console)>(
+		win32::GetProcAddress(module, "ClosePseudoConsole"));
+	api.init_attributes = reinterpret_cast<decltype(api.init_attributes)>(
+		win32::GetProcAddress(module, "InitializeProcThreadAttributeList"));
+	api.update_attribute = reinterpret_cast<decltype(api.update_attribute)>(
+		win32::GetProcAddress(module, "UpdateProcThreadAttribute"));
+	api.delete_attributes = reinterpret_cast<decltype(api.delete_attributes)>(
+		win32::GetProcAddress(module, "DeleteProcThreadAttributeList"));
+	if (api.create == nullptr || api.close_console == nullptr || api.init_attributes == nullptr ||
+		api.update_attribute == nullptr || api.delete_attributes == nullptr)
+	{
+		throw throws ::std::errc::function_not_supported;
+	}
+	return api;
+}
+
+// Owning handle for the duration of a spawn attempt.
+struct handle_guard
+{
+	void *handle{};
+	explicit handle_guard(void *h = nullptr) noexcept : handle(h) {}
+	handle_guard(handle_guard const &) = delete;
+	handle_guard &operator=(handle_guard const &) = delete;
+	~handle_guard() noexcept
+	{
+		if (handle != nullptr)
+		{
+			win32::CloseHandle(handle);
+		}
+	}
+	void *release() noexcept
+	{
+		void *const h{handle};
+		handle = nullptr;
+		return h;
+	}
+};
+
+struct attribute_guard
+{
+	void *list{};
+	conpty_api const *api{};
+	~attribute_guard() noexcept
+	{
+		if (list != nullptr)
+		{
+			api->delete_attributes(list);
+			::free(list);
+		}
+	}
+};
+
+struct console_guard
+{
+	void *console{};
+	conpty_api const *api{};
+	~console_guard() noexcept
+	{
+		if (console != nullptr)
+		{
+			api->close_console(console);
+		}
+	}
+};
+
+void append_decimal(char16_t *&p, ::std::uint_least32_t value) noexcept
+{
+	char16_t digits[12];
+	::std::size_t n{};
+	do
+	{
+		digits[n++] = static_cast<char16_t>(u'0' + value % 10u);
+		value /= 10u;
+	} while (value != 0);
+	while (n != 0)
+	{
+		*p++ = digits[--n];
+	}
+}
+
+void make_pipe_name(char16_t *out, ::std::uint_least32_t tag) noexcept
+{
+	char16_t const prefix[]{u"\\\\.\\pipe\\pwa-code-"};
+	auto *p{out};
+	for (::std::size_t i{}; i + 1 < sizeof(prefix) / sizeof(prefix[0]); ++i)
+	{
+		*p++ = prefix[i];
+	}
+	append_decimal(p, win32::GetCurrentProcessId());
+	*p++ = u'-';
+	append_decimal(p, tag);
+	*p = u'\0';
+}
+
+// One end of a byte-mode named pipe.  The end we keep carries
+// FILE_FLAG_OVERLAPPED so the IOCP scheduler never blocks on it; the end handed
+// to conhost is a separate file object and stays synchronous, which is what the
+// console host expects.
+void *open_pipe_end(char16_t const *name, ::std::uint_least32_t server_access) throws
+{
+	void *const server{win32::CreateNamedPipeW(name, server_access | file_flag_overlapped,
+											   0 /* PIPE_TYPE_BYTE */, 1, 1u << 16, 1u << 16, 0,
+											   nullptr)};
+	if (server == invalid_handle_value())
+	{
+		::fast_io::throw_win32_error();
+	}
+	return server;
+}
+
+void *open_pipe_client(char16_t const *name, ::std::uint_least32_t access) throws
+{
+	void *const client{win32::CreateFileW(name, access, 0, nullptr, 3 /* OPEN_EXISTING */, 0, nullptr)};
+	if (client == invalid_handle_value())
+	{
+		::fast_io::throw_win32_error();
+	}
+	return client;
+}
+
+void spawn_pty(terminal_process &proc) throws
+{
+	conpty_api const api{load_conpty_api()};
+
+	// A per-process counter keeps repeated terminals from reusing a pipe name.
+	static ::std::uint_least32_t pipe_serial{};
+	++pipe_serial;
+	char16_t input_name[64];
+	char16_t output_name[64];
+	make_pipe_name(input_name, pipe_serial * 2u);
+	make_pipe_name(output_name, pipe_serial * 2u + 1u);
+
+	handle_guard input_server{open_pipe_end(input_name, pipe_access_outbound)};
+	handle_guard input_client{open_pipe_client(input_name, generic_read)};
+	handle_guard output_server{open_pipe_end(output_name, pipe_access_inbound)};
+	handle_guard output_client{open_pipe_client(output_name, generic_write)};
+
+	char16_t command_line[1024]{};
+	{
+		::std::uint_least32_t const n{win32::GetEnvironmentVariableW(u"COMSPEC", command_line, 1023)};
+		if (n == 0 || n >= 1023)
+		{
+			char16_t const fallback[]{u"cmd.exe"};
+			for (::std::size_t i{}; i != sizeof(fallback) / sizeof(fallback[0]); ++i)
+			{
+				command_line[i] = fallback[i];
+			}
+		}
+	}
+
+	::std::size_t attributes_size{};
+	(void)api.init_attributes(nullptr, 1, 0, &attributes_size);
+	if (attributes_size == 0) [[unlikely]]
+	{
+		throw throws ::std::errc::not_enough_memory;
+	}
+	attribute_guard attributes{::malloc(attributes_size), __builtin_addressof(api)};
+	if (attributes.list == nullptr) [[unlikely]]
+	{
+		throw throws ::std::errc::not_enough_memory;
+	}
+	if (!api.init_attributes(attributes.list, 1, 0, &attributes_size)) [[unlikely]]
+	{
+		::free(attributes.list);
+		attributes.list = nullptr;  // a failed init must not be deleted
+		::fast_io::throw_win32_error();
+	}
+
+	void *console{};
+	win32_coord const size{120, 30};
+	if (api.create(size, input_client.handle, output_client.handle, 0,
+				   __builtin_addressof(console)) < 0) [[unlikely]]
+	{
+		if (console != nullptr)
+		{
+			api.close_console(console);
+		}
+		throw throws ::std::errc::not_enough_memory;
+	}
+	console_guard console_lifetime{console, __builtin_addressof(api)};
+	if (!api.update_attribute(attributes.list, 0, proc_thread_attribute_pseudoconsole, console,
+							  sizeof(console), nullptr, nullptr)) [[unlikely]]
+	{
+		::fast_io::throw_win32_error();
+	}
+
+	startupinfoex_w startup{};
+	startup.startup.cb = sizeof(startupinfoex_w);
+	startup.attributes = attributes.list;
+	win32::process_information info{};
+	bool const created{win32::CreateProcessW(
+						   nullptr, command_line, nullptr, nullptr, 0, extended_startupinfo_present,
+						   nullptr, nullptr,
+						   reinterpret_cast<win32::startupinfow *>(__builtin_addressof(startup)),
+						   __builtin_addressof(info)) != 0};
+	if (!created) [[unlikely]]
+	{
+		::fast_io::throw_win32_error();
+	}
+	fi::io::perr("child pid=", info.dwProcessId, " cmd=",
+				 ::fast_io::mnp::os_c_str(reinterpret_cast<char const *>(command_line)),
+				 " exited=", win32::WaitForSingleObject(info.hProcess, 0) == 0, "\n");
+	win32::CloseHandle(info.hThread);
+	proc.process = info.hProcess;
+	proc.console = console_lifetime.console;
+	proc.input = input_server.release();
+	proc.output = output_server.release();
+	console_lifetime.console = nullptr;
+}
+
+void close_pty(terminal_process &proc) noexcept
+{
+	if (proc.process != nullptr)
+	{
+		win32::TerminateProcess(proc.process, 1);
+		win32::CloseHandle(proc.process);
+		proc.process = nullptr;
+	}
+	if (proc.console != nullptr)
+	{
+		void *const module{win32::GetModuleHandleW(u"kernel32.dll")};
+		if (module != nullptr)
+		{
+			auto const close_console{reinterpret_cast<void(__stdcall *)(void *)>(
+				win32::GetProcAddress(module, "ClosePseudoConsole"))};
+			if (close_console != nullptr)
+			{
+				close_console(proc.console);
+			}
+		}
+		proc.console = nullptr;
+	}
+	if (proc.input != nullptr)
+	{
+		win32::CloseHandle(proc.input);
+		proc.input = nullptr;
+	}
+	if (proc.output != nullptr)
+	{
+		win32::CloseHandle(proc.output);
+		proc.output = nullptr;
+	}
+}
+
+#else
+
+void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
 {
 	int master{::posix_openpt(O_RDWR | O_NOCTTY)};
 	if (master < 0)
@@ -767,8 +1125,38 @@ fi::u8posix_file spawn_pty(fi::u8string_view shell, pid_t &child) throws
 		::execvp(argv[0], argv);
 		::_exit(127);
 	}
-	child = pid;
-	return fi::u8posix_file{master};
+	proc.child = pid;
+	proc.master.reset(master);
+}
+
+void close_pty(terminal_process &proc) noexcept
+{
+	if (proc.child > 0)
+	{
+		::kill(proc.child, SIGKILL);
+		int status{};
+		(void)::waitpid(proc.child, &status, 0);
+		proc.child = 0;
+	}
+}
+
+#endif
+
+// The slice reads below run with a short deadline so each direction gets a turn.
+// The IOCP backend enforces a deadline by cancelling the pending operation, and
+// a cancelled operation surfaces as ERROR_OPERATION_ABORTED, so both spellings
+// mean the same thing here: nothing arrived during this slice.
+bool slice_elapsed(::std::error const &e) noexcept
+{
+	if (e.equivalent(::std::errc::timed_out))
+	{
+		return true;
+	}
+#if defined(_WIN32)
+	return e.equivalent(static_cast<::fast_io::freestanding::win32_errc>(995u));
+#else
+	return false;
+#endif
 }
 
 fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
@@ -783,6 +1171,14 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		fi::u8string_view{accept, fi::websocket_accept_key_size}, u8"\r\n\r\n");
 	co_await fop::async_output_stream_flush(sched, {}, sock);
 
+	terminal_process proc{};
+#if defined(_WIN32)
+	spawn_pty(proc);
+	fi::u8win32_io_observer const pty_in{proc.input};
+	fi::u8win32_io_observer const pty_out{proc.output};
+	fi::basic_win32_family_socket_io_observer<fi::win32_family::native, char8_t> const sock_io{
+		sock.handle.hsocket};
+#else
 	auto const &shell_env{::getenv("SHELL")};
 	fi::u8string shell;
 	if (shell_env != nullptr)
@@ -795,10 +1191,11 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		shell.assign(u8"/bin/sh");
 	}
 
-	pid_t child{};
-	fi::u8posix_file master{spawn_pty(fi::u8string_view{shell.data(), shell.size()}, child)};
-	fi::u8posix_io_observer const master_io{master.fd};
+	spawn_pty(fi::u8string_view{shell.data(), shell.size()}, proc);
+	fi::u8posix_io_observer const pty_in{proc.master.fd};
+	fi::u8posix_io_observer const pty_out{proc.master.fd};
 	fi::u8posix_socket_io_observer const sock_io{sock.handle.fd};
+#endif
 
 	// Both directions are driven by the same coroutine.  Every read carries a
 	// short timeout, so neither direction can starve the other and there is no
@@ -808,10 +1205,41 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 	::std::byte rbuf[16384];
 	while (running)
 	{
+#if defined(_WIN32)
+		// A ReadFile still pending on a pipe is cancelled by the slice timer,
+		// and a cancelled pipe read throws away the bytes it had already taken.
+		// So never leave a read pending on the console: peek for waiting bytes
+		// and read only when there are some.  The socket read below still paces
+		// the loop, so nothing spins.
+		for (;;)
+		{
+			::std::uint_least32_t available{};
+			if (!::PeekNamedPipe(proc.output, nullptr, 0, nullptr,
+								 __builtin_addressof(available), nullptr))
+			{
+				running = false; // the shell closed the console end
+				break;
+			}
+			if (available == 0)
+			{
+				break;
+			}
+			auto const want{static_cast<::std::size_t>(available) < sizeof(rbuf)
+								? static_cast<::std::size_t>(available)
+								: sizeof(rbuf)};
+			auto const n{co_await fop::async_pread_some_bytes(sched, {}, pty_out, rbuf, want, {})};
+			if (n == 0)
+			{
+				running = false;
+				break;
+			}
+			co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::binary, rbuf, n);
+		}
+#else
 		try
 		{
 			auto const n{co_await fop::async_pread_some_bytes(
-				sched, timeout_milliseconds(8), master_io, rbuf, sizeof(rbuf), {})};
+				sched, timeout_milliseconds(8), pty_out, rbuf, sizeof(rbuf), {})};
 			if (n == 0)
 			{
 				running = false;
@@ -824,11 +1252,12 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		}
 		catch throws(::std::error e)
 		{
-			if (!e.equivalent(::std::errc::timed_out))
+			if (!slice_elapsed(e))
 			{
 				running = false;
 			}
 		}
+#endif
 		if (!running)
 		{
 			break;
@@ -848,7 +1277,7 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		}
 		catch throws(::std::error e)
 		{
-			if (!e.equivalent(::std::errc::timed_out))
+			if (!slice_elapsed(e))
 			{
 				running = false;
 			}
@@ -867,7 +1296,7 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 			case fi::websocket_opcode::continuation:
 				if (!frame.payload.is_empty())
 				{
-					co_await async_write_all(sched, master_io, frame.payload.data(),
+					co_await async_write_all(sched, pty_in, frame.payload.data(),
 											 frame.payload.size());
 				}
 				break;
@@ -884,9 +1313,7 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		}
 	}
 
-	::kill(child, SIGKILL);
-	int status{};
-	(void)::waitpid(child, &status, 0);
+	close_pty(proc);
 }
 
 /* ----------------------------- HTTP -------------------------------- */
@@ -977,6 +1404,15 @@ fi::io_async_task<> session(fi::io_async_observer sched, fi::u8iobuf_socket_file
 			{
 				co_await ws_terminal(sched, sock, req);
 				co_return;
+			}
+			if (req.method == fi::u8string_view{u8"OPTIONS"})
+			{
+				co_await send_preflight(sched, sock, req);
+				if (!req.keep_alive)
+				{
+					co_return;
+				}
+				continue;
 			}
 			if (parts.path == fi::u8string_view{u8"api/ping"})
 			{
