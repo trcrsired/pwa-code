@@ -45,7 +45,9 @@
         <button id="newFileBtn" class="mini-btn" title="New file">+ File</button>
         <button id="newDirBtn" class="mini-btn" title="New folder">+ Dir</button>
       </div>
-      <div id="pathBar" class="path-bar">/</div>
+      <input id="pathBar" class="path-bar" type="text" value="/" spellcheck="false"
+        autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Path"
+        title="Path inside the current mount — Enter to go, Esc to cancel" />
       <div id="fileList" class="file-list" role="listbox"></div>
       <div class="side-foot">
         <button id="pickExternalBtn" class="mini-btn wide">Mount external folder</button>
@@ -53,6 +55,8 @@
         <div id="volStatus" class="vol-status"></div>
       </div>
     </aside>
+    <div id="sidebarHandle" class="sidebar-handle" role="separator" aria-orientation="vertical"
+      aria-label="Resize sidebar" title="Drag to resize; double-click to reset"></div>
 
     <main id="main">
       <div id="editorWrap" class="editor-wrap">

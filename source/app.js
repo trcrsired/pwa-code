@@ -26,6 +26,7 @@ const DEFAULT_SETTINGS = {
   remoteBase: "",
   termUrl: "",
   termLocalEcho: false,
+  sidebarWidth: 0,
 };
 
 const EOL_LABELS = ["Preserve", "LF", "CRLF"];
@@ -128,9 +129,29 @@ function applySettings() {
     state.engineReady ? state.engine.encoding : s.encoding
   ] || "UTF-8";
   $("statusEol").textContent = EOL_LABELS[s.eol] || "Preserve";
+  applySidebarWidth();
   updateHighlight();
   if (state.hexMode) renderHex();
   if (state.term) resizeTerminal();
+}
+
+const SIDEBAR_MIN = 180;
+const EDITOR_MIN = 320;
+
+function clampSidebarWidth(width) {
+  const max = Math.max(SIDEBAR_MIN, Math.min(560, window.innerWidth - EDITOR_MIN));
+  return Math.round(Math.max(SIDEBAR_MIN, Math.min(max, Number(width) || 0)));
+}
+
+// 0 means "use the stylesheet default", which keeps the responsive widths the
+// media queries pick on narrow screens.
+function applySidebarWidth() {
+  const width = Number(state.settings.sidebarWidth) || 0;
+  if (width > 0) {
+    document.documentElement.style.setProperty("--sidebar-w", `${clampSidebarWidth(width)}px`);
+  } else {
+    document.documentElement.style.removeProperty("--sidebar-w");
+  }
 }
 
 function updateDirty(dirty) {
@@ -154,7 +175,7 @@ function updateStatus() {
   if (state.engineReady) {
     $("statusEncoding").textContent = ENCODINGS[state.engine.encoding] || "UTF-8";
   }
-  $("statusWasm").textContent = state.engineReady ? "wasm" : "engine…";
+  $("statusWasm").textContent = state.engineReady ? "wasm" : "engineâ€¦";
   $("docName").textContent = state.path || "untitled";
   updateGutterCursor(line);
 }
@@ -298,6 +319,52 @@ function setVolTab(kind) {
   renderMountBar();
 }
 
+// -------------------------------------------------------------- path bar
+
+// The path bar doubles as an address box: it always shows "/<path>" inside the
+// active mount, and typing a path plus Enter navigates there (or opens the file
+// when the last segment is one).
+function setPathDisplay() {
+  $("pathBar").value = `/${state.volumes.path}`;
+}
+
+function normalizeVolumePath(text) {
+  const parts = [];
+  // Paths are relative to the mount root, so a leading "/" and a ".." above the
+  // root are both silent no-ops rather than errors.
+  for (const part of String(text || "").trim().split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.join("/");
+}
+
+async function goToTypedPath(text) {
+  const target = normalizeVolumePath(text === undefined ? $("pathBar").value : text);
+  if (target === state.volumes.path) {
+    setPathDisplay();
+    return;
+  }
+  try {
+    const volume = state.volumes.active();
+    try {
+      await volume.list(target);
+      state.volumes.path = target;
+      await refreshFiles();
+      return;
+    } catch {
+      // Not a directory: treat it as a file inside the parent we can show.
+    }
+    state.volumes.path = parentPath(target);
+    await refreshFiles();
+    await openPath(target);
+  } catch (error) {
+    fail("path", error);
+    setPathDisplay();
+  }
+}
+
 function renderMountBar() {
   const bar = $("mountBar");
   bar.textContent = "";
@@ -311,13 +378,13 @@ function renderMountBar() {
     const chip = document.createElement("span");
     chip.className = "mount-chip";
     chip.classList.toggle("active", mount.id === state.volumes.mount);
-    chip.title = mount.detail ? `${mount.label} — ${mount.detail}` : mount.label;
+    chip.title = mount.detail ? `${mount.label} â€” ${mount.detail}` : mount.label;
     const name = document.createElement("span");
     name.className = "mount-name";
     name.textContent = mount.label;
     const off = document.createElement("span");
     off.className = "mount-x";
-    off.textContent = "×";
+    off.textContent = "Ã—";
     off.setAttribute("role", "button");
     off.title = "Unmount";
     off.addEventListener("click", (event) => {
@@ -421,7 +488,7 @@ async function openPath(path) {
     $("hexWrap").hidden = true;
     $("editorWrap").hidden = false;
     $("docName").textContent = path;
-    toast(`${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}`);
+    toast(`${path} â€¢ ${info.encodingName}${info.sourceCrlf ? " â€¢ CRLF" : ""}`);
     renderWindow();
     $("editor").focus();
   } catch (error) {
@@ -432,7 +499,7 @@ async function openPath(path) {
 async function refreshFiles() {
   const list = $("fileList");
   list.textContent = "";
-  $("pathBar").textContent = `/${state.volumes.path}`;
+  setPathDisplay();
   let volume = null;
   try {
     volume = state.volumes.active();
@@ -451,7 +518,7 @@ async function refreshFiles() {
     return;
   }
   $("volStatus").textContent =
-    `${volume.label} • ${volume.kind}${volume.readOnly ? " • read-only" : ""}`;
+    `${volume.label} â€¢ ${volume.kind}${volume.readOnly ? " â€¢ read-only" : ""}`;
   try {
     const entries = await volume.list(state.volumes.path);
     if (!entries.length) {
@@ -469,7 +536,7 @@ async function refreshFiles() {
       row.dataset.dir = entry.dir ? "1" : "0";
       const icon = document.createElement("span");
       icon.className = "ficon";
-      icon.textContent = entry.dir ? "▸" : "·";
+      icon.textContent = entry.dir ? "â–¸" : "Â·";
       const name = document.createElement("span");
       name.className = "fname";
       name.textContent = entry.name;
@@ -478,7 +545,7 @@ async function refreshFiles() {
         const del = document.createElement("button");
         del.className = "fdel";
         del.title = entry.dir ? "Remove folder" : "Remove file";
-        del.textContent = "×";
+        del.textContent = "Ã—";
         del.addEventListener("click", (event) => {
           event.stopPropagation();
           removeEntry(entry);
@@ -491,7 +558,7 @@ async function refreshFiles() {
           state.volumes.path = state.volumes.path
             ? `${state.volumes.path}/${entry.name}`
             : entry.name;
-          $("pathBar").textContent = `/${state.volumes.path}`;
+          setPathDisplay();
           refreshFiles();
         } else {
           const path = state.volumes.path
@@ -514,7 +581,7 @@ async function refreshFiles() {
       toast("Remote mount is not reachable. Check its URL, or add a new mount.", true);
     }
   }
-  $("pathBar").textContent = `/${state.volumes.path}`;
+  setPathDisplay();
 }
 
 async function removeEntry(entry) {
@@ -577,7 +644,7 @@ async function saveDocument(saveAs = false) {
     await state.volumes.get(state.volume).write(state.path, bytes);
     updateDirty(false);
     $("docName").textContent = state.path;
-    toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
+    toast(`saved ${state.path} â€¢ ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
     fail("save", error);
@@ -626,7 +693,7 @@ async function openFromFileInput(file) {
     state.settings.eol = 0;
     $("statusEol").textContent = EOL_LABELS[0];
     updateDirty(true);
-    toast(`${file.name} • ${info.encodingName} • unsaved buffer`);
+    toast(`${file.name} â€¢ ${info.encodingName} â€¢ unsaved buffer`);
   } catch (error) {
     fail("open file", error);
   }
@@ -653,7 +720,7 @@ function openHex() {
       $("editorWrap").hidden = true;
       $("hexView").scrollTop = 0;
     }
-    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} • ${state.engine.hexSize} bytes`;
+    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} â€¢ ${state.engine.hexSize} bytes`;
     renderHex();
   } catch (error) {
     fail("hex", error);
@@ -683,7 +750,7 @@ function renderHex() {
     const bottom = Math.max(0, (totalRows - firstRow - rows) * rowHeight);
     view.innerHTML = `<div style="height:${top}px"></div>${body}<div style="height:${bottom}px"></div>`;
     $("hexOffset").value = String(offset);
-    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} • ${state.engine.hexSize} bytes`;
+    $("hexInfo").textContent = `${formatBytes(state.engine.hexSize)} â€¢ ${state.engine.hexSize} bytes`;
   } catch (error) {
     fail("render hex", error);
   }
@@ -728,7 +795,7 @@ async function saveHex() {
       if (!path) return;
     }
     await state.volumes.get(state.volume).write(path, bytes);
-    toast(`saved ${path} • ${formatBytes(bytes.length)}`);
+    toast(`saved ${path} â€¢ ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
     fail("save hex", error);
@@ -777,7 +844,7 @@ function connectTerminal() {
     });
   }
   const url = terminalUrl();
-  $("termStatus").textContent = "connecting…";
+  $("termStatus").textContent = "connectingâ€¦";
   try {
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
@@ -1129,7 +1196,7 @@ async function init() {
   readSettings();
   fillEncodingOptions();
   applySettings();
-  $("statusWasm").textContent = "loading…";
+  $("statusWasm").textContent = "loadingâ€¦";
 
   try {
     const version = await state.engine.init("pwacode.wasm");
@@ -1172,7 +1239,7 @@ async function seedInternal() {
   try {
     const entries = await state.volumes.internal.list("");
     if (entries.length) return;
-    const sample = `// pwa code — fast_io + WebAssembly edition
+    const sample = `// pwa code â€” fast_io + WebAssembly edition
 // Open the native server for the terminal (WebSocket PTY) and remote volume.
 
 #include <fast_io.h>
@@ -1300,6 +1367,52 @@ function bindEvents() {
   $("findClose").addEventListener("click", closeFind);
 
   $("menuBtn").addEventListener("click", () => $("sidebar").classList.toggle("hidden"));
+
+  // Sidebar drag strip.  The width is written straight to --sidebar-w while the
+  // pointer moves and persisted once it is released; double-click forgets it.
+  {
+    const handle = $("sidebarHandle");
+    const sidebar = $("sidebar");
+    let drag = null;
+    const refreshAfterResize = () => {
+      updateHighlight();
+      if (state.hexMode) renderHex();
+      if (state.term && !$("termWrap").hidden) resizeTerminal();
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      drag = { x: event.clientX, width: sidebar.getBoundingClientRect().width };
+      handle.classList.add("dragging");
+      document.body.classList.add("sidebar-resizing");
+      if (handle.setPointerCapture) handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      const width = clampSidebarWidth(drag.width + (event.clientX - drag.x));
+      document.documentElement.style.setProperty("--sidebar-w", `${width}px`);
+    });
+    const finish = (event) => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove("dragging");
+      document.body.classList.remove("sidebar-resizing");
+      if (handle.hasPointerCapture && handle.hasPointerCapture(event.pointerId)) {
+        handle.releasePointerCapture(event.pointerId);
+      }
+      state.settings.sidebarWidth = clampSidebarWidth(sidebar.getBoundingClientRect().width);
+      saveSettings();
+      refreshAfterResize();
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("dblclick", () => {
+      state.settings.sidebarWidth = 0;
+      saveSettings();
+      applySidebarWidth();
+      refreshAfterResize();
+    });
+  }
   $("openBtn").addEventListener("click", () => $("fileInput").click());
   $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
@@ -1372,6 +1485,24 @@ function bindEvents() {
     await refreshFiles();
   });
   $("refreshBtn").addEventListener("click", refreshFiles);
+
+  // Path bar: Enter navigates (or opens the file it names), Esc and blur
+  // discard the edit and put the canonical path back.  The typed text is
+  // captured before blurring, because blur restores the display value.
+  $("pathBar").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const typed = $("pathBar").value;
+      $("pathBar").blur();
+      goToTypedPath(typed);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setPathDisplay();
+      $("pathBar").blur();
+    }
+  });
+  $("pathBar").addEventListener("blur", setPathDisplay);
+
   $("newFileBtn").addEventListener("click", newFile);
   $("newDirBtn").addEventListener("click", newFolder);
   $("pickExternalBtn").addEventListener("click", mountExternal);
