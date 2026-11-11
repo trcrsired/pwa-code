@@ -40,8 +40,10 @@
 #else
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -1096,6 +1098,30 @@ void close_pty(terminal_process &proc) noexcept
 	}
 }
 
+// The ConPTY starts at a fixed size; the browser reports the real one as soon
+// as the WebSocket opens and again whenever the panel changes size.
+void resize_pty(terminal_process &proc, ::std::uint_least16_t cols,
+				::std::uint_least16_t rows) noexcept
+{
+	if (proc.console == nullptr || cols == 0 || rows == 0)
+	{
+		return;
+	}
+	try
+	{
+		conpty_api const api{load_conpty_api()};
+		if (api.resize != nullptr)
+		{
+			(void)api.resize(proc.console,
+							 win32_coord{static_cast<::std::int_least16_t>(cols),
+										 static_cast<::std::int_least16_t>(rows)});
+		}
+	}
+	catch throws(::std::error e)
+	{
+	}
+}
+
 #else
 
 void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
@@ -1147,6 +1173,24 @@ void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
 	}
 	proc.child = pid;
 	proc.master.reset(master);
+	// A sane default until the browser reports its real grid size.
+	struct winsize initial{};
+	initial.ws_col = 80;
+	initial.ws_row = 24;
+	(void)::ioctl(master, TIOCSWINSZ, __builtin_addressof(initial));
+}
+
+void resize_pty(terminal_process &proc, ::std::uint_least16_t cols,
+				::std::uint_least16_t rows) noexcept
+{
+	if (proc.master.fd < 0 || cols == 0 || rows == 0)
+	{
+		return;
+	}
+	struct winsize ws{};
+	ws.ws_col = cols;
+	ws.ws_row = rows;
+	(void)::ioctl(proc.master.fd, TIOCSWINSZ, __builtin_addressof(ws));
 }
 
 void close_pty(terminal_process &proc) noexcept
@@ -1311,8 +1355,24 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 		{
 			switch (frame.op)
 			{
-			case fi::websocket_opcode::text:
 			case fi::websocket_opcode::binary:
+				// Binary frames are terminal control, never keystrokes: the
+				// client sends text for input.  [1, colsHi, colsLo, rowsHi,
+				// rowsLo] tells the PTY its real window size so full-screen
+				// programs (vim, less, top) lay themselves out correctly.
+				if (frame.payload.size() == 5 && frame.payload[0] == ::std::byte{1})
+				{
+					auto const cols{static_cast<::std::uint_least16_t>(
+						(static_cast<unsigned>(frame.payload[1]) << 8) |
+						static_cast<unsigned>(frame.payload[2]))};
+					auto const rows{static_cast<::std::uint_least16_t>(
+						(static_cast<unsigned>(frame.payload[3]) << 8) |
+						static_cast<unsigned>(frame.payload[4]))};
+					resize_pty(proc, cols, rows);
+					break;
+				}
+				[[fallthrough]];
+			case fi::websocket_opcode::text:
 			case fi::websocket_opcode::continuation:
 				if (!frame.payload.is_empty())
 				{

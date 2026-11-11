@@ -52,6 +52,11 @@ export class Terminal {
     this.frame = 0;
     this.onData = options.onData || (() => {});
     this.atBottom = true;
+    this.alt = false;
+    this.savedMain = null;
+    this.scrollTop = 0;
+    this.scrollBottom = -1;
+    this.cursorVisible = true;
     this.clear();
     this.el.classList.add("term-grid");
     this.el.addEventListener("scroll", () => {
@@ -64,6 +69,7 @@ export class Terminal {
     rows = Math.max(5, rows | 0);
     if (cols === this.cols && rows === this.rows) return;
     const old = this.cols;
+    const oldRows = this.rows;
     this.cols = cols;
     this.rows = rows;
     for (const line of this.lines) {
@@ -76,8 +82,15 @@ export class Terminal {
     for (let i = 0; i < this.lines.length; i++) {
       if (this.lines[i].cells.length === 0) this.lines[i] = new Line(cols);
     }
+    if (this.alt) {
+      while (this.lines.length < rows) this.lines.push(new Line(cols));
+      if (this.lines.length > rows) this.lines.length = rows;
+      this.cursorRow = Math.min(this.cursorRow, rows - 1);
+      this.scrollTop = 0;
+      this.scrollBottom = -1;
+    }
     this.cursorCol = Math.min(this.cursorCol, cols - 1);
-    if (old !== cols) this.dirty = true;
+    if (old !== cols || oldRows !== rows) this.dirty = true;
   }
 
   clear() {
@@ -85,6 +98,9 @@ export class Terminal {
     this.cursorRow = 0;
     this.cursorCol = 0;
     this.attr = blankCell();
+    this.scrollTop = 0;
+    this.scrollBottom = -1;
+    this.cursorVisible = true;
     this.dirty = true;
   }
 
@@ -104,6 +120,22 @@ export class Terminal {
   }
 
   newline() {
+    if (this.alt) {
+      // Full-screen programs keep a screen of exactly `rows` lines and scroll
+      // only inside their declared margin (vim, less, top all rely on this).
+      const bottom = this.scrollBottom >= 0 ? this.scrollBottom : this.rows - 1;
+      const top = this.scrollBottom >= 0 ? this.scrollTop : 0;
+      if (this.cursorRow >= bottom) {
+        this.lines.splice(top, 1);
+        this.lines.splice(bottom, 0, new Line(this.cols));
+        this.cursorRow = bottom;
+      } else {
+        this.cursorRow++;
+        while (this.lines.length <= this.cursorRow) this.lines.push(new Line(this.cols));
+      }
+      this.atBottom = true;
+      return;
+    }
     this.cursorRow++;
     if (this.cursorRow >= this.lines.length) this.lines.push(new Line(this.cols));
     if (this.lines.length > this.scrollback) {
@@ -112,6 +144,52 @@ export class Terminal {
       this.cursorRow -= excess;
     }
     this.atBottom = true;
+  }
+
+  reverseIndex() {
+    const bottom = this.scrollBottom >= 0 ? this.scrollBottom : this.rows - 1;
+    const top = this.scrollBottom >= 0 ? this.scrollTop : 0;
+    if (this.cursorRow <= top) {
+      this.lines.splice(bottom, 1);
+      this.lines.splice(top, 0, new Line(this.cols));
+    } else {
+      this.cursorRow--;
+    }
+    this.dirty = true;
+  }
+
+  enterAltScreen() {
+    if (this.alt) return;
+    this.savedMain = {
+      lines: this.lines,
+      cursorRow: this.cursorRow,
+      cursorCol: this.cursorCol,
+      scrollTop: this.scrollTop,
+      scrollBottom: this.scrollBottom,
+    };
+    this.alt = true;
+    this.lines = [];
+    for (let i = 0; i < this.rows; i++) this.lines.push(new Line(this.cols));
+    this.cursorRow = 0;
+    this.cursorCol = 0;
+    this.scrollTop = 0;
+    this.scrollBottom = -1;
+    this.dirty = true;
+  }
+
+  leaveAltScreen() {
+    if (!this.alt) return;
+    this.alt = false;
+    if (this.savedMain) {
+      this.lines = this.savedMain.lines;
+      this.cursorRow = this.savedMain.cursorRow;
+      this.cursorCol = this.savedMain.cursorCol;
+      this.scrollTop = this.savedMain.scrollTop;
+      this.scrollBottom = this.savedMain.scrollBottom;
+      this.savedMain = null;
+    }
+    this.atBottom = true;
+    this.dirty = true;
   }
 
   putChar(ch) {
@@ -145,7 +223,15 @@ export class Terminal {
 
   eraseDisplay(mode) {
     if (mode === 2 || mode === 3) {
-      this.clear();
+      if (this.alt) {
+        // Keep a full screen in the alternate buffer: vim and less rely on
+        // every row existing when they repaint after a clear.
+        this.lines = [];
+        for (let i = 0; i < this.rows; i++) this.lines.push(new Line(this.cols));
+        this.dirty = true;
+      } else {
+        this.clear();
+      }
       return;
     }
     if (mode === 0) {
@@ -213,6 +299,10 @@ export class Terminal {
         const col = Math.max(1, params[1] || 1);
         this.cursorRow = row - 1;
         this.cursorCol = col - 1;
+        if (this.alt) {
+          this.cursorRow = Math.min(this.cursorRow, this.rows - 1);
+          this.cursorCol = Math.min(this.cursorCol, this.cols - 1);
+        }
         this.line(this.cursorRow);
         break;
       }
@@ -226,6 +316,49 @@ export class Terminal {
       case "M": {
         this.lines.splice(this.cursorRow, Math.max(1, n));
         if (this.lines.length <= this.cursorRow) this.lines.push(new Line(this.cols));
+        break;
+      }
+      case "S": {
+        // Scroll up inside the current margin.
+        const top = this.scrollBottom >= 0 ? this.scrollTop : 0;
+        const bottom = this.scrollBottom >= 0 ? this.scrollBottom : this.rows - 1;
+        for (let i = 0; i < Math.max(1, n); i++) {
+          this.lines.splice(top, 1);
+          this.lines.splice(bottom, 0, new Line(this.cols));
+        }
+        break;
+      }
+      case "T": {
+        const top = this.scrollBottom >= 0 ? this.scrollTop : 0;
+        const bottom = this.scrollBottom >= 0 ? this.scrollBottom : this.rows - 1;
+        for (let i = 0; i < Math.max(1, n); i++) {
+          this.lines.splice(bottom, 1);
+          this.lines.splice(top, 0, new Line(this.cols));
+        }
+        break;
+      }
+      case "r": {
+        // DECSTBM: top/bottom scrolling margins (1-based, inclusive).
+        const top = Math.max(1, params[0] || 1) - 1;
+        const bottom = Math.max(top + 1, params[1] || this.rows) - 1;
+        this.scrollTop = Math.min(top, this.rows - 1);
+        this.scrollBottom = Math.min(bottom, this.rows - 1);
+        this.cursorRow = this.scrollTop;
+        this.cursorCol = 0;
+        break;
+      }
+      case "X": {
+        const line = this.line(this.cursorRow);
+        const end = Math.min(this.cols, this.cursorCol + Math.max(1, n));
+        for (let i = this.cursorCol; i < end; i++) line.cells[i] = blankCell();
+        break;
+      }
+      case "n": {
+        // Device status report.  Full-screen programs use 6n to learn the
+        // cursor position; without a reply vim may wait for a timeout.
+        if (!priv && n === 6) {
+          this.onData(`\x1b[${this.cursorRow + 1};${this.cursorCol + 1}R`);
+        }
         break;
       }
       case "P": {
@@ -248,8 +381,22 @@ export class Terminal {
         this.line(this.cursorRow);
         break;
       case "h":
-      case "l":
+      case "l": {
+        const on = final === "h";
+        if (priv) {
+          for (const p of params) {
+            if (p === 25) {
+              this.cursorVisible = on;
+              this.dirty = true;
+            }
+            else if (p === 1049 || p === 1047 || p === 47) {
+              if (on) this.enterAltScreen();
+              else this.leaveAltScreen();
+            }
+          }
+        }
         break;
+      }
       default:
         break;
     }
@@ -315,6 +462,9 @@ export class Terminal {
           continue;
         }
         if (ch === "(" || ch === ")" || ch === "#" || ch === "%") { this.state = "charset"; continue; }
+        if (ch === "M") { this.reverseIndex(); this.state = "normal"; continue; }
+        if (ch === "D") { this.newline(); this.state = "normal"; continue; }
+        if (ch === "E") { this.newline(); this.carriageReturn(); this.state = "normal"; continue; }
         if (ch === "=" || ch === ">" || ch === "c") { this.state = "normal"; if (ch === "c") this.clear(); continue; }
         this.state = "normal";
         continue;
@@ -354,7 +504,8 @@ export class Terminal {
   render() {
     this.dirty = false;
     const pieces = [];
-    for (const line of this.lines) {
+    for (let row = 0; row < this.lines.length; row++) {
+      const line = this.lines[row];
       let runText = "";
       let runKey = "";
       const flush = () => {
@@ -363,7 +514,17 @@ export class Terminal {
         else pieces.push(`<span class="${runKey}">${escapeHtml(runText)}</span>`);
         runText = "";
       };
-      for (const cell of line.cells) {
+      for (let col = 0; col < line.cells.length; col++) {
+        const cell = line.cells[col];
+        // Paint a block cursor over the cell the PTY cursor is on.  This is
+        // what makes vim's position visible: the parser keeps cursorRow/Col
+        // updated from CUP/HVP, so the highlight follows the real terminal.
+        if (this.cursorVisible && row === this.cursorRow && col === this.cursorCol) {
+          flush();
+          const cls = `term-cursor${runKey ? ` ${runKey}` : ""}`;
+          pieces.push(`<span class="${cls}">${escapeHtml(cell.ch)}</span>`);
+          continue;
+        }
         let key = "";
         if (cell.bold) key += "tb ";
         if (cell.underline) key += "tu ";

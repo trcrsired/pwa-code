@@ -98,6 +98,7 @@ button {
 }
 button:hover { background: var(--hover); }
 button:active { background: var(--active); }
+button:disabled { opacity: 0.35; cursor: default; background: transparent; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 1px;
@@ -175,6 +176,8 @@ body.softkb #app { padding-bottom: 94px; }
 .tool-btn { white-space: nowrap; }
 .tool-btn.primary { border-color: var(--accent); color: var(--accent); }
 .icon-btn { padding: 5px 8px; font-size: 15px; line-height: 1; }
+.hist-btn { padding: 5px 8px; font-size: 15px; line-height: 1; }
+button:disabled:hover { background: transparent; }
 
 /* ------------------------------------------------------------- layout */
 
@@ -652,6 +655,12 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
 }
 .term-lines { white-space: pre; }
 .term:focus, .term.kb-focus { box-shadow: inset 0 0 0 1px var(--accent); }
+/* The PTY cursor.  A filled block in the theme's foreground keeps the glyph
+ * readable while still matching vim/less expectations on both themes. */
+.term-cursor {
+  background: var(--fg);
+  color: var(--bg);
+}
 
 /* Focusable proxy that makes a mobile browser raise its own on-screen
  * keyboard for the terminal.  It must remain rendered: display:none or

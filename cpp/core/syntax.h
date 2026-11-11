@@ -244,6 +244,7 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 		{
 			auto const begin{i};
 			::std::size_t end{line.size()};
+			bool closed{};
 			if (!block_close.is_empty())
 			{
 				for (::std::size_t j{i}; j + block_close.size() <= line.size(); ++j)
@@ -251,6 +252,7 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 					if (starts_at(line, j, block_close))
 					{
 						end = j + block_close.size();
+						closed = true;
 						break;
 					}
 				}
@@ -258,14 +260,18 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 			span_begin(out, u8"c");
 			print_escaped(out, ::fast_io::u8string_view{line.data() + begin, end - begin});
 			span_end(out);
-			if (end != line.size())
+			i = end;
+			if (closed)
 			{
 				state.in_block_comment = false;
-				i = end;
 			}
 			else
 			{
-				i = end;
+				// The comment runs to the end of the line; nothing after it can
+				// be code.  Do not key this off end == line.size(): a closing
+				// "*/" that happens to be the last two characters of the line
+				// would then leave the state stuck inside the comment.
+				return;
 			}
 			continue;
 		}

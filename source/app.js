@@ -56,6 +56,10 @@ const state = {
   largeMode: false,
   largeFirst: 0,
   largeScaled: false,
+  history: [],
+  historyIndex: -1,
+  historyTime: 0,
+  applyingHistory: false,
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -372,6 +376,7 @@ function wrapRowsOf(line) {
 
 function enterLargeMode(info) {
   state.largeMode = true;
+  resetHistory();
   const editor = $("editor");
   editor.value = "";
   state.prevText = "";
@@ -525,6 +530,7 @@ function syncEditorToEngine() {
     const end = begin + utf8Length(removed);
     state.engine.replace(begin, end, inserted);
     state.prevText = value;
+    recordHistory(prefix, removed, inserted);
   } catch (error) {
     fail("edit", error);
     // Put the engine back in sync rather than leaving a half-applied edit.
@@ -545,8 +551,91 @@ function setEditorText(text) {
   editor.scrollTop = 0;
   editor.scrollLeft = 0;
   state.wrapDirty = true;
+  resetHistory();
   updateHighlight();
   updateStatus();
+}
+
+/* --------------------------------------------------------------- history */
+
+// Undo entries are diffs, not full copies: a 7 MiB file would otherwise need
+// megabytes per keystroke.  Indices are JS string (UTF-16) offsets, matching
+// setRangeText and the prefix/suffix diff computed in syncEditorToEngine.
+const HISTORY_LIMIT = 400;
+const HISTORY_COALESCE_MS = 700;
+
+function resetHistory() {
+  state.history = [];
+  state.historyIndex = -1;
+  state.historyTime = 0;
+  updateHistoryButtons();
+}
+
+function recordHistory(start, removed, inserted) {
+  if (state.applyingHistory || (removed.length === 0 && inserted.length === 0)) return;
+  const now = performance.now();
+  const last = state.history[state.historyIndex];
+  // Merge a burst of ordinary typing into one entry so Ctrl+Z undoes a word
+  // or a short burst, not a single character at a time.
+  if (
+    last &&
+    now - state.historyTime < HISTORY_COALESCE_MS &&
+    removed.length === 0 &&
+    inserted.length !== 0 &&
+    last.removed.length === 0 &&
+    start === last.start + last.inserted.length
+  ) {
+    last.inserted += inserted;
+    state.historyTime = now;
+    return;
+  }
+  // A fresh edit after undoing throws away the redo branch.
+  state.history.length = state.historyIndex + 1;
+  state.history.push({ start, removed, inserted });
+  state.historyIndex = state.history.length - 1;
+  state.historyTime = now;
+  if (state.history.length > HISTORY_LIMIT) {
+    state.history.shift();
+    state.historyIndex--;
+  }
+  updateHistoryButtons();
+}
+
+function applyHistory(entry, removeText, addText) {
+  const editor = $("editor");
+  editor.focus({ preventScroll: true });
+  editor.setRangeText(addText, entry.start, entry.start + removeText.length, "preserve");
+  state.applyingHistory = true;
+  editor.dispatchEvent(new Event("input"));
+  state.applyingHistory = false;
+  editor.setSelectionRange(entry.start, entry.start + addText.length);
+  updateStatus();
+}
+
+function undo() {
+  if (state.largeMode || state.hexMode || state.historyIndex < 0) return;
+  const entry = state.history[state.historyIndex];
+  state.historyIndex--;
+  state.historyTime = 0;
+  applyHistory(entry, entry.inserted, entry.removed);
+  updateHistoryButtons();
+}
+
+function redo() {
+  if (state.largeMode || state.hexMode || state.historyIndex + 1 >= state.history.length) return;
+  const entry = state.history[++state.historyIndex];
+  state.historyTime = 0;
+  applyHistory(entry, entry.removed, entry.inserted);
+  updateHistoryButtons();
+}
+
+function updateHistoryButtons() {
+  const undoBtn = $("undoBtn");
+  const redoBtn = $("redoBtn");
+  if (!undoBtn || !redoBtn) return;
+  const ready = !state.largeMode && !state.hexMode;
+  undoBtn.disabled = !ready || state.historyIndex < 0;
+  redoBtn.disabled = !ready || state.historyIndex + 1 >= state.history.length;
 }
 
 /* -------------------------------------------------------------- volumes UI */
@@ -1153,16 +1242,35 @@ function connectTerminal() {
 function resizeTerminal() {
   if (!state.term) return;
   const el = $("term");
+  const style = getComputedStyle(el);
+  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
   const meas = document.createElement("span");
   meas.style.cssText = "position:absolute;visibility:hidden;white-space:pre";
   meas.textContent = "M".repeat(40);
   el.appendChild(meas);
   const charWidth = meas.getBoundingClientRect().width / 40 || 8;
   meas.remove();
-  const lineHeight = state.settings.lineHeight * 1.25 || 20;
-  const cols = Math.max(20, Math.floor((el.clientWidth - 18) / charWidth));
-  const rows = Math.max(5, Math.floor((el.clientHeight - 14) / lineHeight));
+  // The terminal's own line-height, not the editor's setting: they are not the
+  // same, and guessing high would leave blank rows at the bottom.
+  const lineHeight =
+    parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 13) * 1.25;
+  const cols = Math.max(20, Math.floor((el.clientWidth - padX) / charWidth));
+  const rows = Math.max(5, Math.floor((el.clientHeight - padY) / lineHeight));
   state.term.resize(cols, rows);
+  sendTerminalSize(cols, rows);
+}
+
+// Text frames are keystrokes, so window changes use a binary control frame:
+// [1, colsHi, colsLo, rowsHi, rowsLo].  The native server turns that into
+// TIOCSWINSZ (or ResizePseudoConsole) before any bytes reach the PTY.
+function sendTerminalSize(cols, rows) {
+  state.termCols = cols;
+  state.termRows = rows;
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  state.ws.send(
+    new Uint8Array([1, (cols >> 8) & 0xff, cols & 0xff, (rows >> 8) & 0xff, rows & 0xff]),
+  );
 }
 
 function toggleTerminal(show) {
@@ -1657,6 +1765,23 @@ function bindEvents() {
   editor.addEventListener("selectionchange", updateStatus);
 
   editor.addEventListener("keydown", (event) => {
+    if (
+      (event.ctrlKey || event.metaKey) && !event.altKey &&
+      (event.key === "z" || event.key === "Z")
+    ) {
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    }
+    if (
+      (event.ctrlKey || event.metaKey) && !event.altKey &&
+      (event.key === "y" || event.key === "Y")
+    ) {
+      event.preventDefault();
+      redo();
+      return;
+    }
     if (event.key === "Tab") {
       event.preventDefault();
       if (event.shiftKey) {
@@ -1772,6 +1897,8 @@ function bindEvents() {
     });
   }
   $("openBtn").addEventListener("click", () => $("fileInput").click());
+  $("undoBtn").addEventListener("click", undo);
+  $("redoBtn").addEventListener("click", redo);
   $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
