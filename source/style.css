@@ -121,7 +121,7 @@ input, select {
   height: 100dvh;
   min-height: 100dvh;
 }
-body.softkb #app { padding-bottom: 94px; }
+body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
 
 /* ------------------------------------------------------------ top bar */
 

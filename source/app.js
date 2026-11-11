@@ -66,6 +66,7 @@ const state = {
   clipboard: null,
   fileMenuEntry: null,
   termQueue: [],
+  softTarget: "editor",
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -1739,12 +1740,16 @@ function toggleSoftKeyboard(show, summon = false) {
 }
 
 function summonOnScreenKeyboard() {
-  // The terminal has no editable field of its own, so it needs the proxy.
-  if (!$("termWrap").hidden) {
+  if (state.largeMode || state.hexMode) return; // no editable textarea on screen
+  // Do not steal the caret from an editor the user is actively typing in just
+  // because the terminal pane happens to be open.
+  const active = document.activeElement;
+  if (active === $("editor") || active === $("pathBar")) return;
+  if (terminalVisible() && (state.softTarget === "terminal" ||
+      active === $("termInput") || active === $("term"))) {
     $("termInput").focus({ preventScroll: true });
     return;
   }
-  if (state.largeMode || state.hexMode) return; // no editable textarea on screen
   $("editor").focus({ preventScroll: true });
 }
 
@@ -1763,7 +1768,21 @@ function positionSoftKeyboard() {
   if (!kb || kb.hidden) return;
   const vv = window.visualViewport;
   const covered = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
+  document.documentElement.style.setProperty("--kb-cover", `${covered}px`);
   kb.style.bottom = covered ? `${covered}px` : "";
+}
+
+// The extra key row belongs to whichever surface currently has the caret.
+// Merely having the terminal open must not steal Esc/Tab/arrows from an editor
+// the user is typing in.
+function softKeyboardTargetsTerminal() {
+  if (!terminalVisible()) return false;
+  const active = document.activeElement;
+  if (active === $("editor") || active === $("pathBar")) return false;
+  if (active === $("termInput") || active === $("term") || $("term").contains(active)) {
+    return true;
+  }
+  return state.softTarget === "terminal";
 }
 
 function editorKeyCommand(key, mods) {
@@ -1797,6 +1816,62 @@ function editorKeyCommand(key, mods) {
     default:
       return false;
   }
+}
+
+// Move the textarea caret for the navigation keys.  The extra key row calls
+// preventDefault() on pointerdown to keep focus/selection, so the browser's
+// native caret movement never runs and the soft keyboard has to do it.
+function moveEditorSelection(key) {
+  const editor = $("editor");
+  const text = editor.value;
+  const pos = editor.selectionStart;
+  const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
+  const lineEnd = text.indexOf("\n", pos);
+  const curEnd = lineEnd < 0 ? text.length : lineEnd;
+  const col = pos - lineStart;
+  let next = pos;
+  if (key === "ArrowLeft") {
+    next = Math.max(0, pos - 1);
+  } else if (key === "ArrowRight") {
+    next = Math.min(text.length, pos + 1);
+  } else if (key === "Home") {
+    next = lineStart;
+  } else if (key === "End") {
+    next = curEnd;
+  } else if (key === "ArrowUp" || key === "ArrowDown" ||
+      key === "PageUp" || key === "PageDown") {
+    const { lineHeight } = fontSizeMetrics();
+    const pageLines = Math.max(1, Math.floor(editor.clientHeight / lineHeight));
+    const delta = key === "ArrowUp" ? -1
+      : key === "ArrowDown" ? 1
+        : key === "PageUp" ? -pageLines
+          : pageLines;
+    const dir = delta < 0 ? -1 : 1;
+    let targetLine = lineStart;
+    for (let i = 0; i < Math.abs(delta); i++) {
+      if (dir < 0) {
+        if (targetLine === 0) break;
+        targetLine = text.lastIndexOf("\n", targetLine - 2) + 1;
+      } else {
+        const nl = text.indexOf("\n", targetLine);
+        if (nl < 0) {
+          targetLine = text.length;
+          break;
+        }
+        targetLine = nl + 1;
+      }
+    }
+    const nextLineEnd = text.indexOf("\n", targetLine);
+    const targetEnd = nextLineEnd < 0 ? text.length : nextLineEnd;
+    next = Math.min(targetLine + col, targetEnd);
+  } else {
+    return false;
+  }
+  if (next === pos) return false;
+  editor.setSelectionRange(next, next);
+  revealSelection();
+  updateStatus();
+  return true;
 }
 
 function insertAtCursor(text) {
@@ -2475,8 +2550,13 @@ function bindEvents() {
     ensureTerminalConnection();
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
   });
-  termInput.addEventListener("focus", () => $("term").classList.add("kb-focus"));
+  termInput.addEventListener("focus", () => {
+    state.softTarget = "terminal";
+    $("term").classList.add("kb-focus");
+  });
   termInput.addEventListener("blur", () => $("term").classList.remove("kb-focus"));
+  $("term").addEventListener("focus", () => { state.softTarget = "terminal"; });
+  $("editor").addEventListener("focus", () => { state.softTarget = "editor"; });
   termInput.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
     // Printable keys are delivered through the input event, which is the only
@@ -2608,18 +2688,14 @@ function bindEvents() {
     key.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       const name = key.dataset.key;
-      if (!$("termWrap").hidden) {
+      if (softKeyboardTargetsTerminal()) {
         sendTerminalKey(name, state.softMods);
       } else {
         const handled = editorKeyCommand(name, state.softMods);
         if (!handled) {
           // Native arrow/home/etc. handling for the focused textarea.
-          const editor = $("editor");
           editor.focus();
-          if (name === "ArrowLeft" || name === "ArrowRight" || name === "ArrowUp" || name === "ArrowDown") {
-            const delta = name === "ArrowLeft" ? -1 : name === "ArrowRight" ? 1 : 0;
-            if (delta) editor.setSelectionRange(editor.selectionStart + delta, editor.selectionStart + delta);
-          }
+          moveEditorSelection(name);
         }
       }
       if (key.dataset.mod !== "ctrl" && key.dataset.mod !== "alt") {
