@@ -65,6 +65,7 @@ const state = {
   statusEditing: false,
   clipboard: null,
   fileMenuEntry: null,
+  termQueue: [],
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -1510,14 +1511,36 @@ function terminalUrl() {
   return `${proto}//${location.host}/ws/term`;
 }
 
+function terminalVisible() {
+  return !$("termWrap").hidden;
+}
+
+function terminalSocketOpen() {
+  return !!state.ws && state.ws.readyState === WebSocket.OPEN;
+}
+
+// A phone (or a browser tab) may be suspended while another app is in front.
+// The PTY WebSocket is frequently closed by the network stack when that
+// happens, so return visits have to re-open it instead of leaving the pane
+// alive but silent.
+function ensureTerminalConnection() {
+  if (!terminalVisible()) return;
+  if (terminalSocketOpen()) return;
+  if (state.ws && state.ws.readyState === WebSocket.CONNECTING) return;
+  connectTerminal();
+}
+
 function connectTerminal() {
-  if (state.ws && state.ws.readyState <= WebSocket.OPEN) {
-    state.ws.close();
+  if (!terminalVisible()) return;
+  if (state.ws) {
+    const old = state.ws;
+    state.ws = null;
+    try { old.close(); } catch { /* already closed */ }
   }
   if (!state.term) {
     state.term = new Terminal($("term"), {
       onData: (data) => {
-        if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(data);
+        if (terminalSocketOpen()) state.ws.send(data);
       },
     });
   }
@@ -1528,18 +1551,30 @@ function connectTerminal() {
     ws.binaryType = "arraybuffer";
     state.ws = ws;
     ws.onopen = () => {
+      if (state.ws !== ws) return;
       $("termStatus").textContent = "connected";
       $("termInput").focus({ preventScroll: true });
+      // Tell the PTY its size before replaying anything the user typed while
+      // the socket was down.
       resizeTerminal();
+      const pending = state.termQueue;
+      state.termQueue = [];
+      for (const chunk of pending) {
+        try { ws.send(chunk); } catch { /* socket closed again */ }
+      }
     };
     ws.onclose = () => {
+      if (state.ws !== ws) return;
+      state.ws = null;
       $("termStatus").textContent = "disconnected";
     };
     ws.onerror = () => {
+      if (state.ws !== ws) return;
       $("termStatus").textContent = "error";
       toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
     };
     ws.onmessage = (event) => {
+      if (state.ws !== ws) return;
       if (typeof event.data === "string") {
         state.term.feed(event.data);
       } else {
@@ -1554,6 +1589,9 @@ function connectTerminal() {
 function resizeTerminal() {
   if (!state.term) return;
   const el = $("term");
+  // A hidden pane has no layout; measuring it would send a bogus 20x5 size to
+  // the PTY.  The next visible resize corrects it.
+  if (!el.clientWidth || !el.clientHeight) return;
   const style = getComputedStyle(el);
   const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
   const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
@@ -1596,18 +1634,24 @@ function toggleTerminal(show) {
   // The code and the terminal share #main when the terminal is open; the
   // divider between them resizes those panes, not the application.
   $("editorWrap").hidden = state.hexMode;
+  // On a phone the explorer is a full-screen drawer stacked above #main, so a
+  // terminal opened behind it would be invisible and untappable.  Selecting a
+  // file already closes the drawer; opening the terminal must do the same.
+  if (visible && window.innerWidth <= 720) $("sidebar").classList.add("hidden");
   if (!visible) {
     if (state.ws) {
-      try { state.ws.close(); } catch { /* already closed */ }
+      const ws = state.ws;
       state.ws = null;
+      try { ws.close(); } catch { /* already closed */ }
     }
+    state.termQueue = [];
     $("termStatus").textContent = "disconnected";
     $("editorWrap").hidden = state.hexMode;
     if (state.hexMode) $("hexWrap").hidden = false;
     return;
   }
   applyTerminalHeight();
-  if (!state.ws) connectTerminal();
+  ensureTerminalConnection();
   requestAnimationFrame(resizeTerminal);
 }
 
@@ -1625,11 +1669,43 @@ function sendTerminalKey(key, mods) {
 }
 
 function sendTerminalBytes(bytes) {
-  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+  if (terminalSocketOpen()) {
     state.ws.send(bytes);
-  } else {
-    toast("Terminal is not connected", true);
+    return;
   }
+  // Queue keystrokes typed while the socket is reconnecting from a suspend;
+  // onopen replays them after sending the PTY size.
+  state.termQueue.push(bytes);
+  if (state.termQueue.length > 64) state.termQueue.shift();
+  ensureTerminalConnection();
+  toast("Terminal reconnecting…", true);
+}
+
+// Coming back from another app or from a locked phone often leaves the pane
+// with stale dimensions and a dead PTY socket.  Re-measure after the browser
+// has restored the viewport, and retry once more after mobile chrome settles.
+let termResumeTimer = 0;
+function resumeTerminal() {
+  if (!terminalVisible()) {
+    positionSoftKeyboard();
+    return;
+  }
+  state.wrapDirty = true;
+  applyTerminalHeight();
+  updateHighlight();
+  positionSoftKeyboard();
+  requestAnimationFrame(() => {
+    if (!terminalVisible()) return;
+    resizeTerminal();
+    ensureTerminalConnection();
+  });
+  clearTimeout(termResumeTimer);
+  termResumeTimer = setTimeout(() => {
+    if (!terminalVisible()) return;
+    resizeTerminal();
+    ensureTerminalConnection();
+    positionSoftKeyboard();
+  }, 300);
 }
 
 /* --------------------------------------------------------- soft keyboard */
@@ -2385,6 +2461,7 @@ function bindEvents() {
   // dismissed, and route physical keys to the PTY at the same time.
   const termInput = $("termInput");
   const focusTerminalInput = () => {
+    ensureTerminalConnection();
     // When the OS keyboard's own hide button dismissed it, the proxy often
     // keeps focus.  A no-op focus() would not raise the keyboard again, so
     // blur first; this still happens inside the tap's user gesture.
@@ -2395,6 +2472,7 @@ function bindEvents() {
   // iOS is more reliable at raising the keyboard from a click than from a
   // pointerdown, so make the click a fallback as well.
   $("term").addEventListener("click", () => {
+    ensureTerminalConnection();
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
   });
   termInput.addEventListener("focus", () => $("term").classList.add("kb-focus"));
@@ -2442,6 +2520,17 @@ function bindEvents() {
     });
     window.visualViewport.addEventListener("scroll", positionSoftKeyboard);
   }
+  // Android/iOS close the PTY socket while the PWA is in the background and
+  // can report the old viewport when it comes back.  Reconnect and re-measure
+  // on every resume path the platform offers.
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) resumeTerminal();
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) resumeTerminal();
+  });
+  window.addEventListener("focus", resumeTerminal);
+  window.addEventListener("online", resumeTerminal);
   if (window.ResizeObserver) {
     // A width change re-wraps every line, so the measured table is stale too.
     new ResizeObserver(() => {
