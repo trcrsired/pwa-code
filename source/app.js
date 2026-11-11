@@ -1180,6 +1180,8 @@ async function openPath(path, quiet = false) {
         (large ? " • large file: read-only partial view" : ""),
     );
     renderWindow();
+    // A full-screen terminal would cover the file that was just chosen.
+    if (window.innerWidth <= 720 && terminalVisible()) collapseTerminalPane();
     if (!large) $("editor").focus();
     scheduleSessionSave();
   } catch (error) {
@@ -1991,6 +1993,18 @@ function sendTerminalSize(cols, rows) {
   state.ws.send(
     new Uint8Array([1, (cols >> 8) & 0xff, cols & 0xff, (rows >> 8) & 0xff, rows & 0xff]),
   );
+}
+
+// On phones the terminal is a full-screen overlay, so a file cannot be seen
+// behind it.  Hide the pane when a file is opened but keep the socket and the
+// server-side shell alive; tapping Terminal brings the same session back.
+function collapseTerminalPane() {
+  const wrap = $("termWrap");
+  if (wrap.hidden) return;
+  wrap.hidden = true;
+  $("termHandle").hidden = true;
+  $("editorWrap").hidden = state.hexMode;
+  if (state.hexMode) $("hexWrap").hidden = false;
 }
 
 function toggleTerminal(show) {

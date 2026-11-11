@@ -1089,6 +1089,19 @@ body[data-theme="light"] .ansi-white { color: #333; }
     box-shadow: none;
   }
   .file-list { overscroll-behavior: contain; }
+  /* On a phone the terminal is not a split pane; it takes the whole area
+   * between the top bar and the status bar, just like the explorer drawer. */
+  #termWrap {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    flex: 1 1 auto;
+    flex-basis: auto;
+    max-height: none;
+    min-height: 0;
+    background: var(--bg);
+  }
+  #termHandle { display: none; }
   #statusbar { gap: 8px; }
   #statusLang, #statusWasm { display: none; }
   .modal-body { grid-template-columns: 1fr; }
