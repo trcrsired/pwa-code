@@ -22,6 +22,7 @@ const DEFAULT_SETTINGS = {
   autoSave: false,
   wrap: false,
   bracketColor: true,
+  conflictDisplay: true,
   encoding: 0,
   eol: 0,
   remoteBase: "",
@@ -174,6 +175,7 @@ function applySettings() {
   $("statusEol").textContent = EOL_LABELS[s.eol] || "Preserve";
   applySidebarWidth();
   applyTerminalHeight();
+  refreshConflicts();
   updateHighlight();
   if (state.hexMode) renderHex();
   if (state.term) resizeTerminal();
@@ -405,7 +407,7 @@ function refreshConflicts() {
     clearTimeout(state.conflictTimer);
     state.conflictTimer = 0;
   }
-  if (state.largeMode || !state.engineReady) {
+  if (state.largeMode || !state.engineReady || !state.settings.conflictDisplay) {
     state.conflicts = [];
     state.conflictLines = new Map();
     state.activeConflict = -1;
@@ -2524,6 +2526,7 @@ function populateSettingsForm() {
   }
   $("setAutoSave").checked = s.autoSave;
   $("setBracketColor").checked = s.bracketColor;
+  $("setConflictDisplay").checked = s.conflictDisplay !== false;
   $("setEncoding").value = String(s.encoding);
   $("setEol").value = String(s.eol);
   $("setRemoteBase").value = s.remoteBase;
@@ -2555,6 +2558,7 @@ async function applySettingsForm() {
   s.indentExplicit = s.indent !== -1;
   s.autoSave = $("setAutoSave").checked;
   s.bracketColor = $("setBracketColor").checked;
+  s.conflictDisplay = $("setConflictDisplay").checked;
   s.encoding = Number($("setEncoding").value) || 0;
   s.eol = Number($("setEol").value) || 0;
   s.remoteBase = $("setRemoteBase").value.trim();
