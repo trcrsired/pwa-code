@@ -3717,7 +3717,8 @@ async function doFileSearch() {
       text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
     }
     // The open file may have unsaved edits; search what the user sees.
-    if (path === state.path && !state.largeMode && !state.hexMode) {
+    if (path === state.path && state.volume === ref &&
+        !state.largeMode && !state.hexMode) {
       text = $("editor").value;
     }
     const found = findFileMatches(
