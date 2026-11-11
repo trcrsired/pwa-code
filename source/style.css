@@ -152,7 +152,7 @@ input, select {
   height: 100dvh;
   min-height: 100dvh;
 }
-body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
+body.softkb #app { padding-bottom: calc(var(--softkb-h, 94px) + var(--kb-cover, 0px)); }
 
 /* ------------------------------------------------------------ top bar */
 
@@ -980,6 +980,11 @@ body.term-max #termWrap {
   max-height: none;
   min-height: 0;
   background: var(--bg);
+}
+/* The soft-key row and the OS keyboard are fixed above the layout viewport;
+ * a full-screen terminal must stop above both or its last rows are hidden. */
+body.term-max.softkb #termWrap {
+  bottom: calc(var(--softkb-h, 94px) + var(--kb-cover, 0px));
 }
 /* Full screen means the shell, not the terminal's own chrome: the session
  * tabs, status text and every toolbar action except the restore button go

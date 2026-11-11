@@ -227,6 +227,8 @@ function applySettings() {
   $("gutter").hidden = !s.lineNumbers;
   const kb = $("softKeyboard");
   if (kb) kb.hidden = !s.softKeyboard;
+  document.body.classList.toggle("softkb", !!s.softKeyboard);
+  if (kb && !kb.hidden) positionSoftKeyboard();
   const editor = $("editor");
   editor.wrap = s.wrap ? "soft" : "off";
   const wrapBtn = $("statusWrap");
@@ -3208,6 +3210,11 @@ function toggleSoftKeyboard(show, summon = false) {
   } else {
     dismissOnScreenKeyboard();
   }
+  // The key row changes the space available to a full-screen terminal even
+  // before the OS keyboard reports a new visualViewport.
+  requestAnimationFrame(() => {
+    if (terminalVisible()) resizeTerminal();
+  });
 }
 
 function summonOnScreenKeyboard() {
@@ -3233,7 +3240,9 @@ function dismissOnScreenKeyboard() {
 
 // Keep the extra key row directly above the OS keyboard instead of hiding
 // behind it.  visualViewport shrinks when the keyboard opens, while the
-// layout viewport (and a fixed `bottom: 0`) does not.
+// layout viewport (and a fixed `bottom: 0`) does not.  The measured row height
+// also drives #app's padding and the full-screen terminal's bottom edge, so
+// the shell shrinks by exactly what the keys and keyboard cover.
 function positionSoftKeyboard() {
   const kb = $("softKeyboard");
   if (!kb || kb.hidden) return;
@@ -3241,6 +3250,10 @@ function positionSoftKeyboard() {
   const covered = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
   document.documentElement.style.setProperty("--kb-cover", `${covered}px`);
   kb.style.bottom = covered ? `${covered}px` : "";
+  document.documentElement.style.setProperty(
+    "--softkb-h",
+    `${Math.ceil(kb.getBoundingClientRect().height)}px`,
+  );
 }
 
 // Detect whether a file indents with tabs or with spaces.  The product only
