@@ -82,6 +82,9 @@ filesystem header is opt-in and is not linked into it.
 - Multiple external mounts and multiple remote mounts are supported.  Remote
   mounts can be a pwa-code server (read/write + terminal) or a plain HTTP
   directory index (read-only).
+- Long file names wrap inside the sidebar row instead of being truncated; the
+  row grows, the icon stays at the first line, and the full name is also in the
+  row's `title` for desktop hover.
 
 ## 3. Layout
 

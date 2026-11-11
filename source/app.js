@@ -790,12 +790,14 @@ async function refreshFiles() {
       row.setAttribute("role", "option");
       row.dataset.name = entry.name;
       row.dataset.dir = entry.dir ? "1" : "0";
+      row.title = entry.name;
       const icon = document.createElement("span");
       icon.className = "ficon";
       icon.textContent = entry.dir ? "▸" : "·";
       const name = document.createElement("span");
       name.className = "fname";
       name.textContent = entry.name;
+      name.title = entry.name;
       row.append(icon, name);
       if (!volume.readOnly) {
         const del = document.createElement("button");

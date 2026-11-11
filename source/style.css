@@ -334,24 +334,41 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
 }
 .file-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 7px;
   padding: 6px 8px;
   border-radius: var(--radius);
   cursor: pointer;
   font-family: var(--mono);
   font-size: 12.5px;
-  white-space: nowrap;
+  /* Touch devices have no hover tooltip, so long names wrap instead of being
+   * silently truncated.  The row grows and the icon/delete button stay put. */
+  white-space: normal;
   overflow: hidden;
 }
 .file-row:hover { background: var(--hover); }
 .file-row.active { background: var(--active); }
-.file-row .ficon { color: var(--accent); width: 14px; text-align: center; flex: 0 0 auto; }
-.file-row .fname { overflow: hidden; text-overflow: ellipsis; }
+.file-row .ficon {
+  color: var(--accent);
+  width: 14px;
+  text-align: center;
+  flex: 0 0 auto;
+  line-height: 1.35;
+  padding-top: 1px;
+}
+.file-row .fname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
 .file-row .fdel {
+  flex: 0 0 auto;
   margin-left: auto;
   border: 0;
   padding: 0 4px;
+  line-height: 1.35;
   color: var(--muted);
   opacity: 0;
 }
