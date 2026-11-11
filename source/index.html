@@ -25,7 +25,7 @@
       <button id="saveAsBtn" class="tool-btn" title="Save as">Save as</button>
       <button id="hexBtn" class="tool-btn" title="Toggle hex editor">Hex</button>
       <button id="termBtn" class="tool-btn" title="Toggle terminal">Terminal</button>
-      <button id="keyboardBtn" class="tool-btn" title="Toggle soft keyboard">⌨</button>
+      <button id="keyboardBtn" class="tool-btn" title="Extra keys and on-screen keyboard">⌨</button>
       <button id="settingsBtn" class="tool-btn" title="Settings">Settings</button>
       <button id="themeBtn" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
     </div>
@@ -99,6 +99,11 @@
           <span id="termStatus" class="muted">disconnected</span>
         </div>
         <div id="term" class="term" tabindex="0" aria-label="Terminal"></div>
+        <!-- A rendered 1px field is the only reliable way to raise a mobile
+             browser's own on-screen keyboard.  It receives the typing and the
+             terminal forwards the bytes to the PTY. -->
+        <textarea id="termInput" class="term-input" autocomplete="off" autocapitalize="off"
+          autocorrect="off" spellcheck="false" aria-hidden="true" tabindex="-1"></textarea>
       </div>
 
       <div id="findBar" class="find-bar" hidden>
@@ -199,7 +204,7 @@
           <input id="setLineHeight" type="number" min="12" max="48" step="1">
         </label>
         <label class="row check"><input id="setLineNumbers" type="checkbox"> Show line numbers</label>
-        <label class="row check"><input id="setSoftKeyboard" type="checkbox"> Show soft keyboard button</label>
+        <label class="row check"><input id="setSoftKeyboard" type="checkbox"> Show extra key row (Esc/Ctrl/arrows)</label>
       </section>
       <section>
         <h3>Editor</h3>

@@ -1128,7 +1128,7 @@ function connectTerminal() {
     state.ws = ws;
     ws.onopen = () => {
       $("termStatus").textContent = "connected";
-      $("term").focus();
+      $("termInput").focus({ preventScroll: true });
       resizeTerminal();
     };
     ws.onclose = () => {
@@ -1197,6 +1197,10 @@ function sendTerminalKey(key, mods) {
   });
   if (key.length === 1 && mods.ctrl) bytes = String.fromCharCode(key.toUpperCase().charCodeAt(0) - 64);
   if (!bytes) return;
+  sendTerminalBytes(bytes);
+}
+
+function sendTerminalBytes(bytes) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(bytes);
   } else {
@@ -1214,13 +1218,52 @@ function toggleWrap() {
   toast(`line wrap: ${state.settings.wrap ? "on" : "off"}`);
 }
 
-function toggleSoftKeyboard(show) {
+// There are two keyboards on a touch device: the browser's own on-screen
+// keyboard (typing, IME, autocorrect) and this extra row of keys that a phone
+// keyboard does not have (Esc, Tab, Ctrl, Alt, arrows).  Toggling the row is
+// also the natural place to raise the OS keyboard, because a mobile browser
+// only shows it from inside a user gesture.
+function toggleSoftKeyboard(show, summon = false) {
   const kb = $("softKeyboard");
   const visible = show ?? kb.hidden;
   kb.hidden = !visible;
   document.body.classList.toggle("softkb", visible);
   state.settings.softKeyboard = visible;
   saveSettings();
+  if (visible) {
+    positionSoftKeyboard();
+    if (summon) summonOnScreenKeyboard();
+  } else {
+    dismissOnScreenKeyboard();
+  }
+}
+
+function summonOnScreenKeyboard() {
+  // The terminal has no editable field of its own, so it needs the proxy.
+  if (!$("termWrap").hidden) {
+    $("termInput").focus({ preventScroll: true });
+    return;
+  }
+  if (state.largeMode || state.hexMode) return; // no editable textarea on screen
+  $("editor").focus({ preventScroll: true });
+}
+
+function dismissOnScreenKeyboard() {
+  // blur() on an element that is not focused is a no-op, so this also covers
+  // the case where the Hide button itself took focus.
+  $("editor").blur();
+  $("termInput").blur();
+}
+
+// Keep the extra key row directly above the OS keyboard instead of hiding
+// behind it.  visualViewport shrinks when the keyboard opens, while the
+// layout viewport (and a fixed `bottom: 0`) does not.
+function positionSoftKeyboard() {
+  const kb = $("softKeyboard");
+  if (!kb || kb.hidden) return;
+  const vv = window.visualViewport;
+  const covered = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
+  kb.style.bottom = covered ? `${covered}px` : "";
 }
 
 function editorKeyCommand(key, mods) {
@@ -1762,15 +1805,70 @@ function bindEvents() {
     const bytes = keyToBytes(event);
     if (bytes) {
       event.preventDefault();
-      if (state.ws && state.ws.readyState === WebSocket.OPEN) state.ws.send(bytes);
+      sendTerminalBytes(bytes);
     }
+  });
+
+  // Tapping the terminal should bring the OS keyboard back after it has been
+  // dismissed, and route physical keys to the PTY at the same time.
+  const termInput = $("termInput");
+  const focusTerminalInput = () => {
+    // When the OS keyboard's own hide button dismissed it, the proxy often
+    // keeps focus.  A no-op focus() would not raise the keyboard again, so
+    // blur first; this still happens inside the tap's user gesture.
+    if (document.activeElement === termInput) termInput.blur();
+    termInput.focus({ preventScroll: true });
+  };
+  $("term").addEventListener("pointerdown", focusTerminalInput);
+  // iOS is more reliable at raising the keyboard from a click than from a
+  // pointerdown, so make the click a fallback as well.
+  $("term").addEventListener("click", () => {
+    if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
+  });
+  termInput.addEventListener("focus", () => $("term").classList.add("kb-focus"));
+  termInput.addEventListener("blur", () => $("term").classList.remove("kb-focus"));
+  termInput.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    // Printable keys are delivered through the input event, which is the only
+    // path that works with soft keyboards and IMEs that report "Unidentified".
+    if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      return;
+    }
+    const bytes = keyToBytes(event);
+    if (bytes) {
+      event.preventDefault();
+      sendTerminalBytes(bytes);
+    }
+  });
+  termInput.addEventListener("input", (event) => {
+    if (event.isComposing) return;
+    const text = termInput.value;
+    if (!text) return;
+    termInput.value = "";
+    // A soft-keyboard Enter arrives as a newline rather than a keydown; the
+    // PTY expects CR.
+    sendTerminalBytes(text.replace(/\r?\n/g, "\r"));
+  });
+  termInput.addEventListener("paste", (event) => {
+    const text = event.clipboardData?.getData("text") || "";
+    if (!text) return;
+    event.preventDefault();
+    sendTerminalBytes(text.replace(/\r?\n/g, "\r"));
   });
   window.addEventListener("resize", () => {
     state.wrapDirty = true;
     updateHighlight();
     if (state.hexMode) renderHex();
     if (state.term && !$("termWrap").hidden) resizeTerminal();
+    positionSoftKeyboard();
   });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", () => {
+      positionSoftKeyboard();
+      if (state.term && !$("termWrap").hidden) resizeTerminal();
+    });
+    window.visualViewport.addEventListener("scroll", positionSoftKeyboard);
+  }
   if (window.ResizeObserver) {
     // A width change re-wraps every line, so the measured table is stale too.
     new ResizeObserver(() => {
@@ -1842,7 +1940,7 @@ function bindEvents() {
     }
   });
 
-  $("keyboardBtn").addEventListener("click", () => toggleSoftKeyboard());
+  $("keyboardBtn").addEventListener("click", () => toggleSoftKeyboard(undefined, true));
   $("skHide").addEventListener("click", () => toggleSoftKeyboard(false));
   for (const key of document.querySelectorAll("#softKeyboard [data-key]")) {
     key.addEventListener("pointerdown", (event) => {

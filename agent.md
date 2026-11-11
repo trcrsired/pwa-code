@@ -85,6 +85,13 @@ filesystem header is opt-in and is not linked into it.
 - Long file names wrap inside the sidebar row instead of being truncated; the
   row grows, the icon stays at the first line, and the full name is also in the
   row's `title` for desktop hover.
+- The ⌨ button raises both keyboards: it shows the extra key row (Esc/Tab/
+  Ctrl/Alt/arrows) and focuses the editor so the device's own on-screen
+  keyboard appears.  `focus()` must run inside the tap gesture for iOS/Android
+  to honour it.  The terminal has no editable element, so a rendered 1px
+  textarea proxy receives the OS keyboard and forwards bytes to the PTY; taps
+  on the terminal refocus it.  `visualViewport` keeps the extra row above the
+  OS keyboard rather than behind it.
 
 ## 3. Layout
 
@@ -183,7 +190,9 @@ Run locally:
    rejection.
 9. 390×844 layout has no horizontal overflow; the sidebar fills the space
    between the top and status bars, stays open when a directory is chosen, and
-   closes only after a file is chosen.  Soft keyboard overlays correctly.
+   closes only after a file is chosen.  The ⌨ toggle shows the extra key row
+   and raises the OS keyboard; tapping the terminal raises it too, typing
+   arrives at the PTY, and the extra row sits above the OS keyboard.
 10. Offline reload is served by the service worker.
 11. Native core: `pwacode-cli` view/hex/UTF-16 save.
 12. Large file (the fast_io 76 MB `iobuf_file.txt`): opens in under a couple of

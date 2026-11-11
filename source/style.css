@@ -651,7 +651,30 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
   cursor: text;
 }
 .term-lines { white-space: pre; }
-.term:focus { box-shadow: inset 0 0 0 1px var(--accent); }
+.term:focus, .term.kb-focus { box-shadow: inset 0 0 0 1px var(--accent); }
+
+/* Focusable proxy that makes a mobile browser raise its own on-screen
+ * keyboard for the terminal.  It must remain rendered: display:none or
+ * visibility:hidden would make focus() a no-op on iOS and Android. */
+.term-input {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: transparent;
+  background: transparent;
+  caret-color: transparent;
+  resize: none;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 .ansi-black { color: #555; } .ansi-red { color: #ff5f5f; }
 .ansi-green { color: #5fd75f; } .ansi-yellow { color: #e5e55f; }

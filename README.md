@@ -21,7 +21,8 @@ shipped as an installable PWA, plus an async native coding server.
   the source policy.
 - **Editing** — Notepad++ keyword sets (36 languages), C++ `throws` /
   `return_failure`, VSCode-style bracket depth colours, find/replace, go to
-  line, hex editor, soft keyboard.
+  line, hex editor, extra-key row (Esc/Tab/Ctrl/Alt/arrows) that also raises
+  the device's on-screen keyboard.
 - **Terminal** — native async PTY over WebSocket.
 - **Errors** — herbceptions only (`throws` / `catch throws (::std::error e)`);
   no errno-style status returns.  Native builds use `-fno-exceptions -fno-rtti
