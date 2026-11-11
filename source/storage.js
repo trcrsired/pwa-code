@@ -13,6 +13,11 @@
 //   write(path, bytes)  -> void
 //   mkdir(path)         -> void
 //   remove(path, isDir) -> void
+//   rename(path, newPath)
+//   stat(path)          -> {name, dir, size, mtime, type}
+//
+// Optional operations are advertised with canRename / canMkdir / canRemove
+// getters so the explorer menu can disable them instead of failing late.
 //
 // Errors are thrown as Error objects with a human readable message.  The C++
 // engine never reports errors through return codes; this JavaScript layer is
@@ -75,6 +80,29 @@ function joinPath(path, name) {
   return path ? `${path}/${name}` : name;
 }
 
+// Copy a file or a whole directory tree between volumes (or within one
+// volume).  The caller is responsible for choosing a free destination name.
+async function copyTreeBetween(srcVolume, srcPath, destVolume, destPath, isDir) {
+  if (!isDir) {
+    await destVolume.write(destPath, await srcVolume.read(srcPath));
+    return;
+  }
+  if (!destVolume.canMkdir) {
+    throw new Error("This volume cannot create folders.");
+  }
+  await destVolume.mkdir(destPath);
+  const entries = await srcVolume.list(srcPath);
+  for (const entry of entries) {
+    await copyTreeBetween(
+      srcVolume,
+      joinPath(srcPath, entry.name),
+      destVolume,
+      joinPath(destPath, entry.name),
+      entry.dir,
+    );
+  }
+}
+
 export function parentPath(path) {
   const parts = splitPath(path);
   parts.pop();
@@ -122,6 +150,11 @@ export class OpfsVolume {
   get readOnly() {
     return false;
   }
+
+  get canRename() { return true; }
+  get canMkdir() { return true; }
+  get canRemove() { return true; }
+  get canStat() { return true; }
 
   async root() {
     if (!this.rootPromise) {
@@ -187,6 +220,50 @@ export class OpfsVolume {
     const dir = await this.dirHandle(parts.join("/"), false);
     await dir.removeEntry(name, { recursive: !!isDir });
   }
+
+  async stat(path) {
+    const parts = splitPath(path);
+    const name = parts.pop();
+    const dir = await this.dirHandle(parts.join("/"), false);
+    try {
+      await dir.getDirectoryHandle(name);
+      return { name, dir: true, size: null, mtime: null, type: "directory" };
+    } catch {
+      /* not a directory, try a file below */
+    }
+    const handle = await dir.getFileHandle(name, { create: false });
+    const file = await handle.getFile();
+    return {
+      name,
+      dir: false,
+      size: file.size,
+      mtime: file.lastModified,
+      type: file.type || "file",
+    };
+  }
+
+  async rename(path, newPath) {
+    const info = await this.stat(path);
+    const parts = splitPath(path);
+    const name = parts.pop();
+    const dir = await this.dirHandle(parts.join("/"), false);
+    const handle = info.dir
+      ? await dir.getDirectoryHandle(name)
+      : await dir.getFileHandle(name, { create: false });
+    const next = splitPath(newPath);
+    const newName = next.pop();
+    const newDir = await this.dirHandle(next.join("/"), true);
+    if (typeof handle.move === "function") {
+      try {
+        await handle.move(newDir, newName);
+        return;
+      } catch {
+        /* fall back to copy + remove below */
+      }
+    }
+    await copyTreeBetween(this, path, this, newPath, info.dir);
+    await this.remove(path, info.dir);
+  }
 }
 
 // ---------------------------------------------------------------- external
@@ -202,6 +279,11 @@ export class ExternalVolume {
   get readOnly() {
     return false;
   }
+
+  get canRename() { return true; }
+  get canMkdir() { return true; }
+  get canRemove() { return true; }
+  get canStat() { return true; }
 
   static supported() {
     return typeof window.showDirectoryPicker === "function";
@@ -269,6 +351,50 @@ export class ExternalVolume {
     const dir = await this.dirHandle(parts.join("/"), false);
     await dir.removeEntry(name, { recursive: !!isDir });
   }
+
+  async stat(path) {
+    const parts = splitPath(path);
+    const name = parts.pop();
+    const dir = await this.dirHandle(parts.join("/"), false);
+    try {
+      await dir.getDirectoryHandle(name);
+      return { name, dir: true, size: null, mtime: null, type: "directory" };
+    } catch {
+      /* not a directory, try a file below */
+    }
+    const handle = await dir.getFileHandle(name, { create: false });
+    const file = await handle.getFile();
+    return {
+      name,
+      dir: false,
+      size: file.size,
+      mtime: file.lastModified,
+      type: file.type || "file",
+    };
+  }
+
+  async rename(path, newPath) {
+    const info = await this.stat(path);
+    const parts = splitPath(path);
+    const name = parts.pop();
+    const dir = await this.dirHandle(parts.join("/"), false);
+    const handle = info.dir
+      ? await dir.getDirectoryHandle(name)
+      : await dir.getFileHandle(name, { create: false });
+    const next = splitPath(newPath);
+    const newName = next.pop();
+    const newDir = await this.dirHandle(next.join("/"), true);
+    if (typeof handle.move === "function") {
+      try {
+        await handle.move(newDir, newName);
+        return;
+      } catch {
+        /* fall back to copy + remove below */
+      }
+    }
+    await copyTreeBetween(this, path, this, newPath, info.dir);
+    await this.remove(path, info.dir);
+  }
 }
 
 // ------------------------------------------------------------------ remote
@@ -293,6 +419,11 @@ export class RemoteVolume {
   get readOnly() {
     return this.mode === "http";
   }
+
+  get canRename() { return false; }
+  get canMkdir() { return false; }
+  get canRemove() { return false; }
+  get canStat() { return true; }
 
   get server() {
     return this.mode === "server";
@@ -410,6 +541,42 @@ export class RemoteVolume {
     const res = await fetch(`${this.base}/${rel}`, { cache: "no-store" });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     return new Uint8Array(await res.arrayBuffer());
+  }
+
+  async stat(path) {
+    const parent = parentPath(path);
+    const name = baseName(path);
+    let entry = null;
+    try {
+      const entries = await this.list(parent);
+      entry = entries.find((e) => e.name === name) || null;
+    } catch {
+      /* the HEAD request below can still describe a file */
+    }
+    if (entry?.dir) {
+      return { name, dir: true, size: null, mtime: null, type: "directory" };
+    }
+    const head = async (url) => {
+      const res = await fetch(url, { method: "HEAD", cache: "no-store" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const length = Number(res.headers.get("content-length"));
+      const modified = Date.parse(res.headers.get("last-modified") || "");
+      return {
+        name,
+        dir: false,
+        size: Number.isFinite(length) ? length : null,
+        mtime: Number.isFinite(modified) ? modified : null,
+        type: res.headers.get("content-type") || "file",
+      };
+    };
+    if (this.mode !== "http") {
+      try {
+        return await head(this.url(`/api/file?path=${encodeURIComponent(path)}`));
+      } catch {
+        /* fall back to the plain HTTP location */
+      }
+    }
+    return head(`${this.base}/${encodePath(path)}`);
   }
 
   async write(path, bytes) {

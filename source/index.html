@@ -245,6 +245,27 @@
 </div>
 
 <input id="fileInput" type="file" hidden>
+
+<!-- Explorer row actions.  The menu is positioned next to the ⋮ button that
+     opened it, like the overflow menu in pwa-player. -->
+<div id="fileMenu" class="file-menu" role="menu" aria-label="File actions" hidden></div>
+
+<div id="propsModal" class="modal" hidden>
+  <div class="modal-card narrow">
+    <div class="modal-head">
+      <h2>Properties</h2>
+      <button id="propsClose" class="icon-btn" aria-label="Close properties">×</button>
+    </div>
+    <div class="modal-body single">
+      <dl id="propsBody" class="props-list"></dl>
+    </div>
+    <div class="modal-foot">
+      <span class="spacer"></span>
+      <button id="propsOk" class="tool-btn primary">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script type="module" src="app.js"></script>
 </body>

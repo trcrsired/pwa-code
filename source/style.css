@@ -369,18 +369,77 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
   word-break: break-word;
   line-height: 1.35;
 }
-.file-row .fdel {
+.file-row .fmenu {
   flex: 0 0 auto;
   margin-left: auto;
   border: 0;
-  padding: 0 4px;
-  line-height: 1.35;
+  padding: 0 6px;
+  line-height: 16px;
+  height: 16px;
   color: var(--muted);
+  font-size: 15px;
   opacity: 0;
+  border-radius: 4px;
+  cursor: pointer;
 }
-.file-row:hover .fdel { opacity: 1; }
-.file-row .fdel:hover { color: var(--danger); }
+.file-row:hover .fmenu,
+.file-row:focus-within .fmenu,
+.file-row.active .fmenu { opacity: 1; }
+.file-row .fmenu:hover,
+.file-row .fmenu[aria-expanded="true"] { color: var(--fg); background: var(--hover); }
+/* Touch screens have no hover, so keep the overflow button visible there. */
+@media (hover: none) {
+  .file-row .fmenu { opacity: 1; }
+}
 .file-empty { color: var(--muted); padding: 14px 10px; font-size: 12px; }
+
+.file-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 178px;
+  max-width: min(260px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  padding: 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.file-menu[hidden] { display: none; }
+.file-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.file-menu button:hover:not(:disabled) { background: var(--hover); }
+.file-menu button:disabled { color: var(--muted); opacity: 0.55; cursor: default; }
+.file-menu .menu-icon { width: 15px; text-align: center; color: var(--accent); }
+.file-menu .menu-sep { height: 1px; margin: 4px 3px; background: var(--border); }
+
+.props-list {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(86px, auto) 1fr;
+  gap: 9px 14px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+.props-list dt { color: var(--muted); }
+.props-list dd { margin: 0; overflow-wrap: anywhere; user-select: text; }
 
 .side-foot {
   padding: 7px;

@@ -63,6 +63,8 @@ const state = {
   historyTime: 0,
   applyingHistory: false,
   statusEditing: false,
+  clipboard: null,
+  fileMenuEntry: null,
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -889,6 +891,7 @@ async function openPath(path) {
 }
 
 async function refreshFiles() {
+  closeFileMenu();
   const list = $("fileList");
   list.textContent = "";
   setPathDisplay();
@@ -935,34 +938,19 @@ async function refreshFiles() {
       name.textContent = entry.name;
       name.title = entry.name;
       row.append(icon, name);
-      if (!volume.readOnly) {
-        const del = document.createElement("button");
-        del.className = "fdel";
-        del.title = entry.dir ? "Remove folder" : "Remove file";
-        del.textContent = "×";
-        del.addEventListener("click", (event) => {
-          event.stopPropagation();
-          removeEntry(entry);
-        });
-        row.appendChild(del);
-      }
-      row.addEventListener("click", () => {
-        if (entry.dir) {
-          state.volumes.path = state.volumes.path
-            ? `${state.volumes.path}/${entry.name}`
-            : entry.name;
-          setPathDisplay();
-          refreshFiles();
-        } else {
-          const path = state.volumes.path
-            ? `${state.volumes.path}/${entry.name}`
-            : entry.name;
-          // A file replaces the editor, so the drawer gets out of the way on
-          // phones.  Selecting a directory keeps it open for the next level.
-          if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
-          openPath(path);
-        }
+      const menuBtn = document.createElement("button");
+      menuBtn.type = "button";
+      menuBtn.className = "fmenu";
+      menuBtn.title = "More actions";
+      menuBtn.setAttribute("aria-label", `Actions for ${entry.name}`);
+      menuBtn.setAttribute("aria-haspopup", "menu");
+      menuBtn.textContent = "⋮";
+      menuBtn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        openFileMenu(menuBtn, entry);
       });
+      row.appendChild(menuBtn);
+      row.addEventListener("click", () => openEntry(entry));
       const full = state.volumes.path ? `${state.volumes.path}/${entry.name}` : entry.name;
       row.classList.toggle("active", !entry.dir && full === state.path);
       list.appendChild(row);
@@ -980,14 +968,281 @@ async function refreshFiles() {
   setPathDisplay();
 }
 
+function currentEntryPath(entry) {
+  return state.volumes.path ? `${state.volumes.path}/${entry.name}` : entry.name;
+}
+
+function openEntry(entry) {
+  if (entry.dir) {
+    state.volumes.path = currentEntryPath(entry);
+    setPathDisplay();
+    refreshFiles();
+    return;
+  }
+  // A file replaces the editor, so the drawer gets out of the way on phones.
+  // Selecting a directory keeps it open for the next level.
+  if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
+  openPath(currentEntryPath(entry));
+}
+
+/* ------------------------------------------------------- explorer menu */
+
+function menuButton(menu, icon, label, action, disabled = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("role", "menuitem");
+  button.setAttribute("aria-label", label);
+  const glyph = document.createElement("span");
+  glyph.className = "menu-icon";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.textContent = icon;
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(glyph, text);
+  button.disabled = !!disabled;
+  if (!disabled) {
+    button.addEventListener("click", () => {
+      closeFileMenu();
+      action();
+    });
+  }
+  menu.appendChild(button);
+  return button;
+}
+
+function menuSeparator(menu) {
+  const sep = document.createElement("div");
+  sep.className = "menu-sep";
+  sep.setAttribute("role", "separator");
+  menu.appendChild(sep);
+}
+
+function closeFileMenu() {
+  const menu = $("fileMenu");
+  if (!menu) return;
+  if (state.fileMenuEntry?.anchor) {
+    state.fileMenuEntry.anchor.setAttribute("aria-expanded", "false");
+  }
+  state.fileMenuEntry = null;
+  menu.hidden = true;
+  menu.textContent = "";
+}
+
+function openFileMenu(anchor, entry) {
+  closeFileMenu();
+  const menu = $("fileMenu");
+  const volume = state.volumes.active();
+  const writable = !volume.readOnly;
+  state.fileMenuEntry = { anchor, entry };
+  anchor.setAttribute("aria-expanded", "true");
+
+  menuButton(menu, entry.dir ? "▸" : "·", "Open", () => openEntry(entry));
+  menuButton(menu, "✎", "Rename", () => renameEntry(entry), !writable || !volume.canRename);
+  menuSeparator(menu);
+  menuButton(menu, "⧉", "Copy", () => setClipboard(entry, "copy"));
+  menuButton(menu, "✂", "Cut", () => setClipboard(entry, "cut"), !writable || !volume.canRemove);
+  menuButton(
+    menu,
+    "▤",
+    entry.dir ? "Paste into folder" : "Paste here",
+    () => pasteEntry(entry),
+    !state.clipboard || (entry.dir ? !writable || !volume.canMkdir : !writable),
+  );
+  menuButton(menu, "🗑", "Delete", () => removeEntry(entry),
+    !writable || !volume.canRemove);
+  menuSeparator(menu);
+  menuButton(menu, "ⓘ", "Properties", () => showProperties(entry), !volume.canStat);
+
+  menu.hidden = false;
+  // Position the menu under the ⋮ button, flipping above and clamping to the
+  // viewport when the row is near an edge (important in the phone drawer).
+  const rect = anchor.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  let left = rect.right - box.width;
+  let top = rect.bottom + 4;
+  if (left < 8) left = 8;
+  if (left + box.width > window.innerWidth - 8) {
+    left = window.innerWidth - box.width - 8;
+  }
+  if (top + box.height > window.innerHeight - 8) top = rect.top - box.height - 4;
+  if (top < 8) top = 8;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+
+function setClipboard(entry, mode) {
+  state.clipboard = {
+    volume: state.volumes.ref(),
+    path: currentEntryPath(entry),
+    name: entry.name,
+    dir: entry.dir,
+    mode,
+  };
+  toast(`${mode === "cut" ? "cut" : "copied"} ${entry.name}`);
+}
+
+function copyName(name, taken) {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  let candidate = `${stem}-copy${ext}`;
+  let n = 2;
+  while (taken.has(candidate)) candidate = `${stem}-copy-${n++}${ext}`;
+  return candidate;
+}
+
+async function pasteEntry(entry) {
+  const clip = state.clipboard;
+  if (!clip) return;
+  try {
+    const destVolume = state.volumes.active();
+    const destRef = state.volumes.ref();
+    const destDir = entry.dir ? currentEntryPath(entry) : state.volumes.path;
+    if (clip.volume === destRef &&
+        (destDir === clip.path || destDir.startsWith(`${clip.path}/`))) {
+      throw new Error("A folder cannot be pasted into itself.");
+    }
+    const srcVolume = state.volumes.get(clip.volume);
+    const existing = await destVolume.list(destDir);
+    const taken = new Set(existing.map((e) => e.name));
+    const name = taken.has(clip.name) ? copyName(clip.name, taken) : clip.name;
+    const destPath = destDir ? `${destDir}/${name}` : name;
+    await copyTreeBetweenVolume(srcVolume, clip.path, destVolume, destPath, clip.dir);
+    if (clip.mode === "cut") {
+      await srcVolume.remove(clip.path, clip.dir);
+      state.clipboard = null;
+    }
+    await refreshFiles();
+    toast(`pasted ${name}`);
+  } catch (error) {
+    fail("paste", error);
+  }
+}
+
+async function copyTreeBetweenVolume(srcVolume, srcPath, destVolume, destPath, isDir) {
+  if (!isDir) {
+    await destVolume.write(destPath, await srcVolume.read(srcPath));
+    return;
+  }
+  if (!destVolume.canMkdir) throw new Error("This volume cannot create folders.");
+  await destVolume.mkdir(destPath);
+  const entries = await srcVolume.list(srcPath);
+  for (const item of entries) {
+    await copyTreeBetweenVolume(
+      srcVolume,
+      `${srcPath}/${item.name}`,
+      destVolume,
+      `${destPath}/${item.name}`,
+      item.dir,
+    );
+  }
+}
+
+async function renameEntry(entry) {
+  const volume = state.volumes.active();
+  const oldPath = currentEntryPath(entry);
+  if (volume.readOnly || !volume.canRename) {
+    toast("This volume cannot rename files.", true);
+    return;
+  }
+  const name = prompt("Rename (name only, not a path)", entry.name);
+  if (!name || name === entry.name) return;
+  if (/[\/\\]/.test(name) || name === "." || name === "..") {
+    toast("Names cannot contain / or \\ and cannot be . or ..", true);
+    return;
+  }
+  try {
+    const dir = state.volumes.path;
+    const newPath = dir ? `${dir}/${name}` : name;
+    const existing = (await volume.list(dir)).find((e) => e.name === name);
+    if (existing) {
+      if (!confirm(`Replace the existing ${name}?`)) return;
+      await volume.remove(newPath, existing.dir);
+    }
+    await volume.rename(oldPath, newPath);
+    if (state.path === oldPath) {
+      state.path = newPath;
+    } else if (state.path.startsWith(`${oldPath}/`)) {
+      state.path = newPath + state.path.slice(oldPath.length);
+    }
+    if (state.path) $("docName").textContent = state.path;
+    if (state.clipboard?.volume === state.volumes.ref()) {
+      const clip = state.clipboard;
+      if (clip.path === oldPath) {
+        clip.path = newPath;
+        clip.name = name;
+      } else if (clip.path.startsWith(`${oldPath}/`)) {
+        clip.path = newPath + clip.path.slice(oldPath.length);
+      }
+    }
+    await refreshFiles();
+    toast(`renamed ${entry.name} to ${name}`);
+  } catch (error) {
+    fail("rename", error);
+  }
+}
+
+function propertyRow(list, label, value) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = value;
+  list.append(dt, dd);
+}
+
+async function showProperties(entry) {
+  const volume = state.volumes.active();
+  const path = currentEntryPath(entry);
+  const list = $("propsBody");
+  list.textContent = "";
+  propertyRow(list, "Name", entry.name);
+  propertyRow(list, "Path", path || "/");
+  propertyRow(list, "Volume", `${volume.label} (${volume.kind})`);
+  propertyRow(list, "Type", entry.dir ? "Folder" : "File");
+  let info = null;
+  try {
+    info = await volume.stat(path);
+  } catch {
+    /* size and modified time are optional */
+  }
+  if (info) {
+    propertyRow(list, "Size",
+      entry.dir || info.size == null ? "—" : formatBytes(info.size));
+    if (info.type && !entry.dir) propertyRow(list, "MIME", info.type);
+    propertyRow(list, "Modified",
+      info.mtime ? new Date(info.mtime).toLocaleString() : "—");
+  }
+  if (entry.dir) {
+    try {
+      const children = await volume.list(path);
+      propertyRow(list, "Contents", `${children.length} item${children.length === 1 ? "" : "s"}`);
+    } catch {
+      /* unreadable folder */
+    }
+  }
+  propertyRow(list, "Writable", volume.readOnly ? "no (read-only mount)" : "yes");
+  $("propsModal").hidden = false;
+}
+
 async function removeEntry(entry) {
-  const path = state.volumes.path ? `${state.volumes.path}/${entry.name}` : entry.name;
+  const volume = state.volumes.active();
+  const path = currentEntryPath(entry);
+  if (volume.readOnly || !volume.canRemove) {
+    toast("This volume cannot delete files.", true);
+    return;
+  }
   if (!confirm(`Remove ${path}?`)) return;
   try {
-    await state.volumes.active().remove(path, entry.dir);
-    if (state.path === path) {
+    await volume.remove(path, entry.dir);
+    if (state.path === path || state.path.startsWith(`${path}/`)) {
       state.path = "";
       updateDirty(false);
+      $("docName").textContent = "untitled";
+    }
+    if (state.clipboard) {
+      const clip = state.clipboard;
+      if (clip.path === path || clip.path.startsWith(`${path}/`)) state.clipboard = null;
     }
     await refreshFiles();
     toast(`removed ${path}`);
@@ -2061,6 +2316,26 @@ function bindEvents() {
     });
   }
   $("openBtn").addEventListener("click", () => $("fileInput").click());
+  $("propsClose").addEventListener("click", () => { $("propsModal").hidden = true; });
+  $("propsOk").addEventListener("click", () => { $("propsModal").hidden = true; });
+  $("propsModal").addEventListener("click", (event) => {
+    if (event.target === $("propsModal")) $("propsModal").hidden = true;
+  });
+  // Dismiss the explorer menu on an outside tap, Escape, resize, or when the
+  // list scrolls away from the row it belongs to.
+  document.addEventListener("pointerdown", (event) => {
+    if ($("fileMenu").hidden) return;
+    if (event.target.closest("#fileMenu")) return;
+    closeFileMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("fileMenu").hidden) {
+      event.preventDefault();
+      closeFileMenu();
+    }
+  });
+  $("fileList").addEventListener("scroll", closeFileMenu, { passive: true });
+  window.addEventListener("resize", closeFileMenu);
   $("undoBtn").addEventListener("click", undo);
   $("redoBtn").addEventListener("click", redo);
   $("saveBtn").addEventListener("click", () => saveDocument(false, true));
