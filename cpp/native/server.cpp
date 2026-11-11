@@ -15,6 +15,11 @@
 // lna_allows(), exactly like the fast_io async http-server example.  By default
 // only loopback/local peers may connect.
 //
+// Scheduler: io_uring on Linux when the kernel allows it, otherwise fast_io's
+// POSIX thread pool (Android, seccomp sandboxes, --no-uring).  The PTY master
+// is non-blocking on the pool so its short read deadlines still let one
+// coroutine alternate shell and socket traffic.
+//
 // Build:
 //   clang++ --config=$HOME/cfgs/x86_64-linux-gnu-libcxx.cfg \
 //       -fherbceptions -lherbceptions -O3 -flto=thin -s -pthread \
@@ -45,6 +50,9 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #endif
 
 namespace fi = ::fast_io;
@@ -52,6 +60,13 @@ namespace fop = ::fast_io::operations;
 
 namespace
 {
+
+// Set before the accept loop starts.  The thread-pool async backend honours a
+// read deadline by polling a NON-BLOCKING descriptor: a blocking read parks the
+// worker inside the kernel where it cannot be interrupted, which would freeze
+// the terminal pump's alternating shell/socket reads.  io_uring does not need
+// this (it cancels the op itself), so the flag stays false there.
+bool pty_nonblocking{};
 
 constexpr fi::u8string_view sv(fi::u8string const &s) noexcept
 {
@@ -75,6 +90,7 @@ struct server_cfg
 	fi::u8string workspace;
 	::std::uint_least16_t port{8099};
 	fi::ip_address_space lna_max{fi::ip_address_space::local_address};
+	bool no_uring{};
 };
 
 struct request
@@ -376,7 +392,8 @@ inline fi::u8string_view cors_headers() noexcept
 	return fi::u8string_view{cors_text, sizeof(cors_text) - 1};
 }
 
-fi::io_async_task<> send_preflight(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> send_preflight(Sched sched, fi::u8iobuf_socket_file &sock,
 								   request const &req) throws
 {
 	co_await fi::io::async_print(
@@ -387,7 +404,8 @@ fi::io_async_task<> send_preflight(fi::io_async_observer sched, fi::u8iobuf_sock
 	co_await fop::async_output_stream_flush(sched, {}, sock);
 }
 
-fi::io_async_task<> send_simple(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> send_simple(Sched sched, fi::u8iobuf_socket_file &sock,
 								unsigned code, fi::u8string_view phrase, fi::u8string_view body,
 								request const &req, bool close) throws
 {
@@ -405,7 +423,8 @@ fi::io_async_task<> send_simple(fi::io_async_observer sched, fi::u8iobuf_socket_
 	co_await fop::async_output_stream_flush(sched, {}, sock);
 }
 
-fi::io_async_task<> send_json(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> send_json(Sched sched, fi::u8iobuf_socket_file &sock,
 							  fi::u8string_view json, request const &req, unsigned code = 200,
 							  fi::u8string_view phrase = u8"OK") throws
 {
@@ -425,7 +444,8 @@ fi::io_async_task<> send_json(fi::io_async_observer sched, fi::u8iobuf_socket_fi
 
 /* ----------------------------- static ------------------------------- */
 
-fi::io_async_task<> serve_static(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> serve_static(Sched sched, fi::u8iobuf_socket_file &sock,
 								 server_cfg const &cfg, fi::u8string_view rel, request const &req) throws
 {
 	fi::u8string path{cfg.root_path};
@@ -501,7 +521,8 @@ fi::io_async_task<> serve_static(fi::io_async_observer sched, fi::u8iobuf_socket
 /* ------------------------------ API --------------------------------- */
 
 // GET /api/list?path=...
-fi::io_async_task<> api_list(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> api_list(Sched sched, fi::u8iobuf_socket_file &sock,
 							 server_cfg const &cfg, target_parts const &t, request const &req) throws
 {
 	try
@@ -550,7 +571,8 @@ fi::io_async_task<> api_list(fi::io_async_observer sched, fi::u8iobuf_socket_fil
 }
 
 // GET/PUT /api/file?path=...
-fi::io_async_task<> api_file(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> api_file(Sched sched, fi::u8iobuf_socket_file &sock,
 							 server_cfg const &cfg, target_parts const &t, request const &req) throws
 {
 	auto const rel{query_path(sv(t.query))};
@@ -639,7 +661,8 @@ constexpr fi::posix_statx_timestamp_opt timeout_milliseconds(::std::uint_least64
 		true};
 }
 
-fi::io_async_task<> async_write_all(fi::io_async_observer sched, auto out,
+template <typename Sched>
+fi::io_async_task<> async_write_all(Sched sched, auto out,
 									::std::byte const *data, ::std::size_t len) throws
 {
 	while (len != 0)
@@ -759,7 +782,8 @@ struct ws_parser
 	}
 };
 
-fi::io_async_task<> ws_send_frame(fi::io_async_observer sched, auto out,
+template <typename Sched>
+fi::io_async_task<> ws_send_frame(Sched sched, auto out,
 								  bool fin, fi::websocket_opcode op,
 								  ::std::byte const *data, ::std::size_t len) throws
 {
@@ -1126,7 +1150,7 @@ void resize_pty(terminal_process &proc, ::std::uint_least16_t cols,
 
 void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
 {
-	int master{::posix_openpt(O_RDWR | O_NOCTTY)};
+	int master{::posix_openpt(O_RDWR | O_NOCTTY | (pty_nonblocking ? O_NONBLOCK : 0))};
 	if (master < 0)
 	{
 		::fast_io::throw_posix_error();
@@ -1162,11 +1186,27 @@ void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
 		(void)::dup2(slave, 0);
 		(void)::dup2(slave, 1);
 		(void)::dup2(slave, 2);
-		if (slave > 2)
+		// The shell must start with a clean descriptor table.  Anything the
+		// server holds — the listener, other clients' sockets, open files —
+		// would otherwise survive exec and keep a closed browser connection
+		// in CLOSE_WAIT forever, so the browser waits for a close handshake
+		// that never arrives and eventually exhausts its per-host sockets.
+		bool closed{false};
+#if defined(__linux__) && defined(SYS_close_range)
+		// close_range is one syscall but needs Linux 5.9; older Android
+		// kernels answer ENOSYS, so fall back to the descriptor loop.
+		closed = ::syscall(SYS_close_range, 3u, ~0u, 0u) == 0;
+#endif
+		if (!closed)
 		{
-			::close(slave);
+			long const open_max{::sysconf(_SC_OPEN_MAX)};
+			int const fd_limit{open_max > 0 && open_max < 65536 ? static_cast<int>(open_max)
+															   : 65536};
+			for (int fd = 3; fd < fd_limit; ++fd)
+			{
+				::close(fd);
+			}
 		}
-		::close(master);
 		char *argv[]{const_cast<char *>(reinterpret_cast<char const *>(shell.data())), nullptr};
 		::execvp(argv[0], argv);
 		::_exit(127);
@@ -1402,7 +1442,8 @@ terminal_session *create_terminal_session(fi::u8string_view id, bool persistent,
 	return session;
 }
 
-fi::io_async_task<> send_session_scrollback(fi::io_async_observer sched, auto sock_io,
+template <typename Sched>
+fi::io_async_task<> send_session_scrollback(Sched sched, auto sock_io,
 										   terminal_session *session,
 										   bool replay) throws
 {
@@ -1422,7 +1463,8 @@ fi::io_async_task<> send_session_scrollback(fi::io_async_observer sched, auto so
 	}
 }
 
-fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+template <typename Sched>
+fi::io_async_task<> ws_terminal(Sched sched, fi::u8iobuf_socket_file &sock,
 								request const &req, fi::u8string_view query) throws
 {
 	purge_terminal_sessions();
@@ -1657,7 +1699,8 @@ fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_
 
 /* ----------------------------- HTTP -------------------------------- */
 
-fi::io_async_task<> session(fi::io_async_observer sched, fi::u8iobuf_socket_file sock,
+template <typename Sched>
+fi::io_async_task<> session(Sched sched, fi::u8iobuf_socket_file sock,
 							server_cfg cfg) throws
 {
 	try
@@ -1810,7 +1853,8 @@ fi::io_async_task<> session(fi::io_async_observer sched, fi::u8iobuf_socket_file
 	}
 }
 
-fi::io_async_task<> accept_loop(fi::io_async_observer sched, fi::u8native_socket_io_observer listener,
+template <typename Sched>
+fi::io_async_task<> accept_loop(Sched sched, fi::u8native_socket_io_observer listener,
 								server_cfg cfg) throws
 {
 	for (;;)
@@ -1818,6 +1862,32 @@ fi::io_async_task<> accept_loop(fi::io_async_observer sched, fi::u8native_socket
 		fi::u8native_socket_file accepted{
 			co_await fop::async_accept(sched, {}, listener, fi::open_mode::no_block)};
 		session(sched, fi::u8iobuf_socket_file{::std::move(accepted)}, cfg).detach();
+	}
+}
+
+// Drive the accept loop on one scheduler until it dies.  The body is a
+// template so the same server can run on io_uring, the POSIX thread pool or
+// Windows IOCP; only the scheduler type differs.
+template <typename Sched>
+[[noreturn]] inline void run_server(Sched scheduler, fi::u8native_socket_io_observer listener,
+									server_cfg cfg) throws
+{
+	for (;;)
+	{
+		try
+		{
+			auto acceptor{accept_loop(scheduler, listener, cfg)};
+			acceptor.resume();
+			while (!acceptor.done())
+			{
+				fi::io_async_wait(scheduler);
+			}
+			acceptor.rethrow_if_error();
+		}
+		catch throws(::std::error e)
+		{
+			fi::io::perrln(e);
+		}
 	}
 }
 
@@ -1874,10 +1944,14 @@ int main(int argc, char const **argv) noexcept
 			}
 			cfg.lna_max = rule.space;
 		}
+		else if (arg == fi::u8cstring_view{u8"--no-uring"})
+		{
+			cfg.no_uring = true;
+		}
 		else if (arg == fi::u8cstring_view{u8"-h"} || arg == fi::u8cstring_view{u8"--help"})
 		{
 			fi::io::perr("Usage: pwacode-server [docs-root] [-p port] [-w workspace] "
-						 "[--lna loopback|local|public]\n");
+						 "[--lna loopback|local|public] [--no-uring]\n");
 			return 0;
 		}
 		else if (root.is_empty())
@@ -1903,16 +1977,13 @@ int main(int argc, char const **argv) noexcept
 	}
 	cfg.root_path = root;
 	cfg.workspace = workspace;
+	if (auto const *env{::getenv("PWA_NO_IO_URING")}; env != nullptr && env[0] != '\0' &&
+														  !(env[0] == '0' && env[1] == '\0'))
+	{
+		cfg.no_uring = true;
+	}
 
 	fi::net_service service;
-#if defined(__linux__) && !defined(__ANDROID__)
-	// io_async defaults to an SQPOLL ring.  Its kernel thread busy-spins while
-	// the terminal loop resubmits reads, so an idle server can burn a whole
-	// core.  A plain ring sleeps in io_uring_enter and keeps idle CPU at zero.
-	fi::linux_io_uring scheduler{fi::native_interface, 64, 0};
-#else
-	fi::io_async_scheduler scheduler{fi::io_async};
-#endif
 	fi::u8native_socket_file listener{fi::tcp_listen(cfg.port, fi::open_mode::no_block)};
 	fi::io::perr("pwa-code server on http://127.0.0.1:", cfg.port, " (root=",
 				 ::fast_io::mnp::os_c_str(reinterpret_cast<char const *>(root.c_str())),
@@ -1934,23 +2005,43 @@ int main(int argc, char const **argv) noexcept
 			}
 		}
 	}
-	for (;;)
+#if defined(_WIN32)
+	fi::io_async_scheduler scheduler{fi::io_async};
+	run_server<fi::io_async_observer>(scheduler, listener, cfg);
+#else
+	// Android kernels (and many sandboxes) refuse io_uring with EPERM, and an
+	// app that somehow created a ring can still hang on enter.  Prefer the
+	// portable thread-pool backend there and whenever the user asks for it;
+	// otherwise try io_uring first and fall back if setup refuses.
+	bool use_pool{cfg.no_uring};
+#if defined(__ANDROID__)
+	use_pool = true;
+#endif
+#if defined(__linux__)
+	if (!use_pool)
 	{
 		try
 		{
-			auto acceptor{accept_loop(scheduler, listener, cfg)};
-			acceptor.resume();
-			while (!acceptor.done())
-			{
-				fi::io_async_wait(scheduler);
-			}
-			acceptor.rethrow_if_error();
+			// io_async defaults to an SQPOLL ring.  Its kernel thread
+			// busy-spins while the terminal loop resubmits reads, so an idle
+			// server can burn a whole core.  A plain ring sleeps in
+			// io_uring_enter and keeps idle CPU at zero.
+			fi::linux_io_uring scheduler{fi::native_interface, 64, 0};
+			run_server<fi::linux_io_uring_observer>(scheduler, listener, cfg);
 		}
 		catch throws(::std::error e)
 		{
-			fi::io::perrln(e);
+			fi::io::perr("io_uring unavailable (", e,
+						 "); falling back to the thread-pool backend\n");
 		}
 	}
+#endif
+	// The pool can only honour the PTY read deadline on a non-blocking
+	// descriptor, so tell spawn_pty before the first session is created.
+	pty_nonblocking = true;
+	fi::posix_thread_pool scheduler{fi::io_async};
+	run_server<fi::posix_thread_pool_observer>(scheduler, listener, cfg);
+#endif
 	}
 	catch throws(::std::error e)
 	{

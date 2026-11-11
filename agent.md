@@ -132,7 +132,7 @@ Exports: `pwa_alloc`, `pwa_free`, `pwa_out_*`, `pwa_view_*`, `pwa_version`,
 ### Server (`cpp/native/server.cpp`)
 
 ```
-pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public]
+pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public] [--no-uring]
 ```
 
 - Serves `docs/`, negotiating Brotli/Gzip.
@@ -141,8 +141,11 @@ pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public
 - `GET|PUT /api/file?path=...`
 - `GET /ws/terminal` — RFC 6455 WebSocket PTY.
 - LNA defaults to local addresses.
-- Pure async: one coroutine pumps PTY and socket with timed async reads; no
-  threads.
+- Async I/O runs on io_uring where the kernel allows it.  When io_uring setup
+  fails (Android, seccomp sandboxes) or `--no-uring` / `PWA_NO_IO_URING=1` is
+  given, the server falls back to fast_io's POSIX thread-pool scheduler.  The
+  PTY master is opened non-blocking on that backend so its timed reads still
+  alternate shell and socket traffic.  No `std::thread` is used either way.
 - File responses and the CLI map files with `fast_io::native_file_loader`
   (`mmap` on POSIX, mapping on Windows) and write the mapped bytes, rather than
   looping over `pread`.  The CLI maps the input directly, so the portable core

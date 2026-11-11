@@ -57,7 +57,7 @@ build/build-cli.sh      # ./pwacode-cli
 ## Server
 
 ```
-pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public]
+pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public] [--no-uring]
 ```
 
 | Endpoint | Purpose |
@@ -69,7 +69,9 @@ pwacode-server [docs-root] [-p port] [-w workspace] [--lna loopback|local|public
 
 Static assets are served from `docs/` with Brotli/Gzip negotiation.  LNA
 defaults to loopback/local peers; the terminal and HTTP server are fully async
-and use no `std::thread`.  File responses use `fast_io::native_file_loader`
+and use no `std::thread`.  io_uring is used where available and the POSIX
+thread-pool scheduler takes over on Android or when `--no-uring` /
+`PWA_NO_IO_URING=1` is set.  File responses use `fast_io::native_file_loader`
 (memory-mapped I/O) instead of a `pread` loop, and the CLI maps its input the
 same way.
 
