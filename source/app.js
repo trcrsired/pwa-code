@@ -76,6 +76,7 @@ const state = {
   conflictLines: new Map(),
   conflictTimer: 0,
   activeConflict: -1,
+  conflictCount: 0,
   docIndent: 0,
 };
 
@@ -408,16 +409,19 @@ function refreshConflicts() {
     state.conflicts = [];
     state.conflictLines = new Map();
     state.activeConflict = -1;
-    updateConflictUI();
+    state.conflictCount = 0;
+    updateConflictUI(false);
     return;
   }
   const text = $("editor").value;
   state.conflicts = text.includes("<<<<<<<") ? scanConflicts(text) : [];
   state.conflictLines = buildConflictLineMap(state.conflicts);
+  const reappeared = state.conflictCount === 0 && state.conflicts.length !== 0;
+  state.conflictCount = state.conflicts.length;
   if (state.activeConflict >= state.conflicts.length) {
     state.activeConflict = state.conflicts.length - 1;
   }
-  updateConflictUI();
+  updateConflictUI(reappeared);
 }
 
 function scheduleConflictRefresh() {
@@ -437,7 +441,7 @@ function applyConflictClasses(container) {
   }
 }
 
-function updateConflictUI() {
+function updateConflictUI(reopen = false) {
   const button = $("statusConflicts");
   const count = state.conflicts.length;
   if (button) {
@@ -452,6 +456,9 @@ function updateConflictUI() {
     state.activeConflict = -1;
     return;
   }
+  // Undoing a merge resolution brings the markers back; the conflict list
+  // should come back with them instead of leaving the user to hunt for it.
+  if (reopen) panel.hidden = false;
   if (!panel.hidden) renderConflictList();
 }
 
@@ -708,7 +715,8 @@ function enterLargeMode(info) {
   state.conflicts = [];
   state.conflictLines = new Map();
   state.activeConflict = -1;
-  updateConflictUI();
+  state.conflictCount = 0;
+  updateConflictUI(false);
 }
 
 function exitLargeMode() {
@@ -937,6 +945,8 @@ function applyHistory(entry, removeText, addText) {
   editor.dispatchEvent(new Event("input"));
   state.applyingHistory = false;
   editor.setSelectionRange(entry.start, entry.start + addText.length);
+  refreshConflicts();
+  updateHighlight();
   updateStatus();
 }
 
