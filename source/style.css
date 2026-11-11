@@ -108,6 +108,12 @@ body {
  * and one-finger scrolling stay native. */
 #editorWrap, #termStack { touch-action: pan-x pan-y; }
 
+/* The Browser page zoom setting hands pinch/double-tap back to the browser. */
+html.browser-zoom,
+html.browser-zoom body,
+html.browser-zoom #editorWrap,
+html.browser-zoom #termStack { touch-action: auto; }
+
 button, input, select, textarea {
   font-family: inherit;
   font-size: inherit;

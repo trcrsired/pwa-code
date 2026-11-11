@@ -16,6 +16,7 @@ const DEFAULT_SETTINGS = {
   fontSize: 13,
   lineHeight: 20,
   termFontSize: 13,
+  browserZoom: false,
   lineNumbers: true,
   softKeyboard: false,
   indent: -1,
@@ -157,6 +158,7 @@ function readSettings() {
 
 function applySettings() {
   const s = state.settings;
+  applyBrowserZoom();
   document.body.dataset.theme = s.theme === "light" ? "light" : "dark";
   document.body.classList.toggle("no-bracket-color", !s.bracketColor);
   document.body.classList.toggle("wrap-mode", !!s.wrap);
@@ -197,6 +199,23 @@ function applySettings() {
 }
 
 /* ------------------------------------------------------------------ zoom */
+
+// Browser page zoom and the app's editor/terminal zoom are alternatives.
+// When browser zoom is on, the viewport allows pinch/Ctrl zoom and every
+// custom zoom path below steps aside so the browser behaves normally.
+function applyBrowserZoom() {
+  const on = !!state.settings.browserZoom;
+  const meta = document.querySelector('meta[name="viewport"]');
+  if (meta) {
+    meta.setAttribute(
+      "content",
+      on
+        ? "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+        : "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content",
+    );
+  }
+  document.documentElement.classList.toggle("browser-zoom", on);
+}
 
 const EDITOR_FONT_MIN = 9;
 const EDITOR_FONT_MAX = 72;
@@ -323,13 +342,14 @@ function bindPinchZoom(element, surface) {
     start = 0;
   };
   element.addEventListener("touchstart", (event) => {
-    if (event.touches.length !== 2) {
+    if (state.settings.browserZoom || event.touches.length !== 2) {
       stop();
       return;
     }
     start = pinchDistance(event.touches);
   }, { passive: true });
   element.addEventListener("touchmove", (event) => {
+    if (state.settings.browserZoom) return;
     if (event.touches.length !== 2 || !start) return;
     event.preventDefault();
     const distance = pinchDistance(event.touches);
@@ -348,6 +368,7 @@ function bindPinchZoom(element, surface) {
 // Returns true when the event was a zoom shortcut.  The caller stops
 // propagation so the terminal never receives a stray "=" or "-" byte.
 function handleZoomKey(event) {
+  if (state.settings.browserZoom) return false;
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
   if (event.key === "0") {
     resetZoom(zoomSurfaceFor(document.activeElement));
@@ -2149,7 +2170,7 @@ async function newFolder() {
 
 /* ------------------------------------------------------------------ save */
 
-async function saveDocument(saveAs = false, ask = false) {
+async function saveDocument(saveAs = false) {
   if (!state.engineReady) return;
   if (state.largeMode) {
     toast("Large files open in the read-only partial view; edit them with the native CLI.", true);
@@ -2161,10 +2182,6 @@ async function saveDocument(saveAs = false, ask = false) {
     if (!name) return;
     state.path = name;
     state.volume = state.volumes.ref();
-  } else if (ask) {
-    // Saving overwrites the file on the current volume.  Only the explicit
-    // Save button (and Ctrl+S) asks first; autosave must stay unattended.
-    if (!confirm(`Save changes to ${state.path}?`)) return;
   }
   try {
     syncEditorToEngine();
@@ -2782,6 +2799,15 @@ function hideTerminalPane() {
   $("termInput").blur();
   $("editorWrap").hidden = state.hexMode;
   if (state.hexMode) $("hexWrap").hidden = false;
+  // Hiding the terminal returns the caret to the code, so typing goes back to
+  // the document instead of a terminal that is no longer on screen.
+  if (!state.hexMode && !state.largeMode) {
+    requestAnimationFrame(() => {
+      if (!$("termWrap").hidden) return;
+      state.softTarget = "editor";
+      $("editor").focus({ preventScroll: true });
+    });
+  }
 }
 
 function collapseTerminalPane() {
@@ -2818,7 +2844,14 @@ function toggleTerminal(show) {
   updateTerminalStatus();
   applyTerminalHeight();
   ensureTerminalConnection();
-  requestAnimationFrame(() => resizeTerminal());
+  requestAnimationFrame(() => {
+    if ($("termWrap").hidden) return;
+    resizeTerminal();
+    // Opening the terminal should put the caret (and on mobile the OS
+    // keyboard) in the shell, not leave it in the code behind the pane.
+    state.softTarget = "terminal";
+    $("termInput").focus({ preventScroll: true });
+  });
 }
 
 function sendTerminalKey(key, mods) {
@@ -3105,6 +3138,65 @@ function editorKeyCommand(key, mods) {
   }
 }
 
+// Target offset for a vertical caret move.  Lines are logical lines (split by
+// "\n"), never the visual rows produced by soft wrap, so Down from a wrapped
+// line goes to the next real line.
+function editorVerticalTarget(key, pos) {
+  const editor = $("editor");
+  const text = editor.value;
+  const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
+  const col = pos - lineStart;
+  const { lineHeight } = fontSizeMetrics();
+  const pageLines = Math.max(1, Math.floor(editor.clientHeight / lineHeight));
+  const delta = key === "ArrowUp" ? -1
+    : key === "ArrowDown" ? 1
+      : key === "PageUp" ? -pageLines
+        : pageLines;
+  const dir = delta < 0 ? -1 : 1;
+  let targetLine = lineStart;
+  for (let i = 0; i < Math.abs(delta); i++) {
+    if (dir < 0) {
+      if (targetLine === 0) break;
+      targetLine = text.lastIndexOf("\n", targetLine - 2) + 1;
+    } else {
+      const nl = text.indexOf("\n", targetLine);
+      if (nl < 0) {
+        targetLine = text.length;
+        break;
+      }
+      targetLine = nl + 1;
+    }
+  }
+  const nextLineEnd = text.indexOf("\n", targetLine);
+  const targetEnd = nextLineEnd < 0 ? text.length : nextLineEnd;
+  return Math.min(targetLine + col, targetEnd);
+}
+
+// Physical Up/Down in a wrapped textarea normally walks visual rows.  When
+// wrap is on, keep the active selection end and move by logical lines instead.
+function moveEditorLogical(key, extend) {
+  const editor = $("editor");
+  let anchor = editor.selectionStart;
+  let active = editor.selectionEnd;
+  if (editor.selectionDirection === "backward") {
+    anchor = editor.selectionEnd;
+    active = editor.selectionStart;
+  }
+  const target = editorVerticalTarget(key, active);
+  if (target === active) return;
+  if (extend) {
+    editor.setSelectionRange(
+      Math.min(anchor, target),
+      Math.max(anchor, target),
+      target < anchor ? "backward" : "forward",
+    );
+  } else {
+    editor.setSelectionRange(target, target);
+  }
+  revealSelection();
+  updateStatus();
+}
+
 // Move the textarea caret for the navigation keys.  The extra key row calls
 // preventDefault() on pointerdown to keep focus/selection, so the browser's
 // native caret movement never runs and the soft keyboard has to do it.
@@ -3115,7 +3207,6 @@ function moveEditorSelection(key) {
   const lineStart = text.lastIndexOf("\n", pos - 1) + 1;
   const lineEnd = text.indexOf("\n", pos);
   const curEnd = lineEnd < 0 ? text.length : lineEnd;
-  const col = pos - lineStart;
   let next = pos;
   if (key === "ArrowLeft") {
     next = Math.max(0, pos - 1);
@@ -3127,30 +3218,7 @@ function moveEditorSelection(key) {
     next = curEnd;
   } else if (key === "ArrowUp" || key === "ArrowDown" ||
       key === "PageUp" || key === "PageDown") {
-    const { lineHeight } = fontSizeMetrics();
-    const pageLines = Math.max(1, Math.floor(editor.clientHeight / lineHeight));
-    const delta = key === "ArrowUp" ? -1
-      : key === "ArrowDown" ? 1
-        : key === "PageUp" ? -pageLines
-          : pageLines;
-    const dir = delta < 0 ? -1 : 1;
-    let targetLine = lineStart;
-    for (let i = 0; i < Math.abs(delta); i++) {
-      if (dir < 0) {
-        if (targetLine === 0) break;
-        targetLine = text.lastIndexOf("\n", targetLine - 2) + 1;
-      } else {
-        const nl = text.indexOf("\n", targetLine);
-        if (nl < 0) {
-          targetLine = text.length;
-          break;
-        }
-        targetLine = nl + 1;
-      }
-    }
-    const nextLineEnd = text.indexOf("\n", targetLine);
-    const targetEnd = nextLineEnd < 0 ? text.length : nextLineEnd;
-    next = Math.min(targetLine + col, targetEnd);
+    next = editorVerticalTarget(key, pos);
   } else {
     return false;
   }
@@ -3450,6 +3518,7 @@ function populateSettingsForm() {
   $("setLineNumbers").checked = s.lineNumbers;
   $("setWrap").checked = s.wrap;
   $("setSoftKeyboard").checked = s.softKeyboard;
+  $("setBrowserZoom").checked = !!s.browserZoom;
   $("setIndent").value = String(s.indent);
   const autoIndent = $("setIndent").querySelector('option[value="-1"]');
   if (autoIndent) {
@@ -3486,6 +3555,7 @@ async function applySettingsForm() {
   s.lineNumbers = $("setLineNumbers").checked;
   s.wrap = $("setWrap").checked;
   s.softKeyboard = $("setSoftKeyboard").checked;
+  s.browserZoom = $("setBrowserZoom").checked;
   s.indent = Number($("setIndent").value);
   if (!Number.isFinite(s.indent)) s.indent = -1;
   s.indentExplicit = s.indent !== -1;
@@ -3738,6 +3808,22 @@ function bindEvents() {
       state.autoSaveTimer = setTimeout(() => saveDocument(false), 900);
     }
   });
+  // Some browsers copy soft-wrapped rows as hard line breaks.  Always take
+  // the exact logical selection from the buffer instead of the rendered text.
+  const copyEditorSelection = (event) => {
+    if (event.target !== editor || !event.clipboardData) return;
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    if (start === end) return;
+    event.clipboardData.setData("text/plain", editor.value.slice(start, end));
+    event.preventDefault();
+    if (event.type === "cut") {
+      editor.setRangeText("", start, end, "start");
+      editor.dispatchEvent(new Event("input"));
+    }
+  };
+  editor.addEventListener("copy", copyEditorSelection);
+  editor.addEventListener("cut", copyEditorSelection);
   editor.addEventListener("scroll", rerender, { passive: true });
   $("largeScroll").addEventListener("scroll", () => updateHighlight(), { passive: true });
   editor.addEventListener("keyup", updateStatus);
@@ -3746,6 +3832,14 @@ function bindEvents() {
   editor.addEventListener("selectionchange", updateStatus);
 
   editor.addEventListener("keydown", (event) => {
+    if (!event.isComposing && state.settings.wrap &&
+        !event.altKey && !event.ctrlKey && !event.metaKey &&
+        (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      // Up/Down move between real lines, not the visual rows produced by wrap.
+      event.preventDefault();
+      moveEditorLogical(event.key, event.shiftKey);
+      return;
+    }
     if (event.key === "F3") {
       event.preventDefault();
       findNext(event.shiftKey ? -1 : 1);
@@ -3792,7 +3886,7 @@ function bindEvents() {
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
-      saveDocument(false, true);
+      saveDocument(false);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
       event.preventDefault();
       $("fileInput").click();
@@ -4018,7 +4112,7 @@ function bindEvents() {
   window.addEventListener("resize", closeFileMenu);
   $("undoBtn").addEventListener("click", undo);
   $("redoBtn").addEventListener("click", redo);
-  $("saveBtn").addEventListener("click", () => saveDocument(false, true));
+  $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
   $("hexClose").addEventListener("click", closeHex);
@@ -4428,6 +4522,7 @@ function bindEvents() {
   // event is cancelled even over the sidebar or toolbar, and the editor or
   // terminal font changes instead.
   document.addEventListener("wheel", (event) => {
+    if (state.settings.browserZoom) return;
     if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     zoomSurface(zoomSurfaceFor(event.target), event.deltaY < 0 ? 1 : -1);
@@ -4436,7 +4531,10 @@ function bindEvents() {
   // Safari raises these for a pinch even when the viewport meta says
   // user-scalable=no.  Cancel them so only our UI zoom runs.
   for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
-    document.addEventListener(type, (event) => event.preventDefault(), { passive: false });
+    document.addEventListener(type, (event) => {
+      if (state.settings.browserZoom) return;
+      event.preventDefault();
+    }, { passive: false });
   }
   bindPinchZoom($("editorWrap"), "editor");
   bindPinchZoom($("termStack"), "terminal");

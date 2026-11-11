@@ -3,6 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<script>
+  // Apply a saved "browser page zoom" choice before the stylesheet and app
+  // load, because mobile browsers read the viewport meta during startup.
+  try {
+    var saved = JSON.parse(localStorage.getItem("pwacode.settings.v1") || "{}");
+    if (saved && saved.browserZoom) {
+      document.querySelector('meta[name="viewport"]').setAttribute("content",
+        "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content");
+      document.documentElement.classList.add("browser-zoom");
+    }
+  } catch (e) { /* private mode or malformed settings */ }
+</script>
 <meta name="theme-color" content="#000000">
 <meta name="description" content="pwa code - a portable fast_io powered code editor">
 <link rel="manifest" href="manifest.webmanifest">
@@ -230,6 +242,7 @@
         </label>
         <label class="row check"><input id="setLineNumbers" type="checkbox"> Show line numbers</label>
         <label class="row check"><input id="setSoftKeyboard" type="checkbox"> Show extra key row (Esc/Ctrl/arrows)</label>
+        <label class="row check"><input id="setBrowserZoom" type="checkbox"> Use browser page zoom (pinch / Ctrl+wheel)</label>
       </section>
       <section>
         <h3>Editor</h3>
