@@ -103,6 +103,8 @@
           <button id="termNew" class="mini-btn" title="New terminal">+</button>
           <button id="termConnect" class="mini-btn">Connect</button>
           <button id="termClear" class="mini-btn">Clear</button>
+          <button id="termZoomOut" class="mini-btn" title="Zoom terminal out (Ctrl+-) — double-click to reset" aria-label="Zoom terminal out">A−</button>
+          <button id="termZoomIn" class="mini-btn" title="Zoom terminal in (Ctrl+=) — double-click to reset" aria-label="Zoom terminal in">A+</button>
           <button id="termCopy" class="mini-btn" title="Copy selected terminal text">Copy</button>
           <button id="termPaste" class="mini-btn" title="Paste clipboard into the shell">Paste</button>
           <button id="termClose" class="mini-btn">Close</button>
@@ -134,8 +136,10 @@
   </div>
 
   <footer id="statusbar">
-    <span id="statusLine" class="status-line" title="Line and column — click and type a line number to jump" aria-label="Line and column; click and type a line number to jump">Ln 1, Col 1</span>
+    <span id="statusLine" class="status-line" title="Line:column — click and type 26:5 to jump" aria-label="Line and column; click and type line:column to jump">1:1</span>
     <span id="statusSel"></span>
+    <button id="statusZoomOut" class="status-btn" title="Zoom editor out (Ctrl+-) — double-click to reset" aria-label="Zoom editor out">A−</button>
+    <button id="statusZoomIn" class="status-btn" title="Zoom editor in (Ctrl+=) — double-click to reset" aria-label="Zoom editor in">A+</button>
     <span class="spacer"></span>
     <button id="statusConflicts" class="status-btn conflict-btn" title="Merge conflicts — click for the conflict list (F8 / Shift+F8)" hidden>Conflicts 0</button>
     <button id="statusEncoding" class="status-btn" title="Change encoding">UTF-8</button>
@@ -255,6 +259,9 @@
         </label>
         <label class="row">Terminal WebSocket
           <input id="setTermUrl" type="text" placeholder="active remote mount / auto">
+        </label>
+        <label class="row">Terminal font size
+          <input id="setTermFontSize" type="number" min="8" max="32" step="1">
         </label>
         <label class="row check"><input id="setTermLocalEcho" type="checkbox"> Local echo (debug)</label>
       </section>

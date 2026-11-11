@@ -1905,7 +1905,14 @@ int main(int argc, char const **argv) noexcept
 	cfg.workspace = workspace;
 
 	fi::net_service service;
+#if defined(__linux__) && !defined(__ANDROID__)
+	// io_async defaults to an SQPOLL ring.  Its kernel thread busy-spins while
+	// the terminal loop resubmits reads, so an idle server can burn a whole
+	// core.  A plain ring sleeps in io_uring_enter and keeps idle CPU at zero.
+	fi::linux_io_uring scheduler{fi::native_interface, 64, 0};
+#else
 	fi::io_async_scheduler scheduler{fi::io_async};
+#endif
 	fi::u8native_socket_file listener{fi::tcp_listen(cfg.port, fi::open_mode::no_block)};
 	fi::io::perr("pwa-code server on http://127.0.0.1:", cfg.port, " (root=",
 				 ::fast_io::mnp::os_c_str(reinterpret_cast<char const *>(root.c_str())),

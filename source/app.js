@@ -15,6 +15,7 @@ const DEFAULT_SETTINGS = {
   theme: "dark",
   fontSize: 13,
   lineHeight: 20,
+  termFontSize: 13,
   lineNumbers: true,
   softKeyboard: false,
   indent: -1,
@@ -153,6 +154,10 @@ function applySettings() {
   document.body.classList.toggle("wrap-mode", !!s.wrap);
   document.documentElement.style.setProperty("--font-size", `${s.fontSize}px`);
   document.documentElement.style.setProperty("--line-height", `${s.lineHeight}px`);
+  document.documentElement.style.setProperty(
+    "--term-font-size",
+    `${Number(s.termFontSize) || DEFAULT_SETTINGS.termFontSize}px`,
+  );
   document.documentElement.style.setProperty("--gutter-w", s.lineNumbers ? "" : "0px");
   $("gutter").hidden = !s.lineNumbers;
   const kb = $("softKeyboard");
@@ -181,6 +186,112 @@ function applySettings() {
   updateHighlight();
   if (state.hexMode) renderHex();
   if (activeTermInst()) resizeTerminal();
+}
+
+/* ------------------------------------------------------------------ zoom */
+
+const EDITOR_FONT_MIN = 9;
+const EDITOR_FONT_MAX = 32;
+const TERM_FONT_MIN = 8;
+const TERM_FONT_MAX = 32;
+
+function clampZoom(value, min, max) {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+// Ctrl/Cmd + wheel or +/- zoom whichever surface owns the caret.  The editor
+// and the terminal keep separate font sizes: a big readable shell must not
+// also enlarge the code buffer, and vice versa.
+function zoomSurfaceFor(element) {
+  if (element && $("termWrap").contains(element)) return "terminal";
+  if (element && $("editorWrap").contains(element)) return "editor";
+  return terminalVisible() && state.softTarget === "terminal" ? "terminal" : "editor";
+}
+
+function repaintTerminals() {
+  const inst = activeTermInst();
+  if (!inst) return;
+  inst.term.dirty = true;
+  requestAnimationFrame(() => {
+    resizeTerminal(inst);
+    inst.term.schedule();
+  });
+}
+
+function zoomEditor(delta) {
+  const s = state.settings;
+  const size = clampZoom(s.fontSize + delta, EDITOR_FONT_MIN, EDITOR_FONT_MAX);
+  if (size === s.fontSize) return;
+  const editor = $("editor");
+  const oldLineHeight = s.lineHeight;
+  const topLine = oldLineHeight > 0 ? editor.scrollTop / oldLineHeight : 0;
+  const spacing = s.lineHeight / Math.max(1, s.fontSize);
+  s.fontSize = size;
+  s.lineHeight = Math.max(size + 2, Math.min(48, Math.round(size * spacing)));
+  saveSettings();
+  applySettings();
+  if (topLine > 0) editor.scrollTop = topLine * s.lineHeight;
+  state.wrapDirty = true;
+  updateHighlight();
+  toast(`editor zoom ${size}px`);
+}
+
+function zoomTerminal(delta) {
+  const s = state.settings;
+  const current = Number(s.termFontSize) || DEFAULT_SETTINGS.termFontSize;
+  const size = clampZoom(current + delta, TERM_FONT_MIN, TERM_FONT_MAX);
+  if (size === current) return;
+  s.termFontSize = size;
+  saveSettings();
+  applySettings();
+  repaintTerminals();
+  toast(`terminal zoom ${size}px`);
+}
+
+function resetZoom(surface) {
+  const s = state.settings;
+  if (surface === "terminal") {
+    s.termFontSize = DEFAULT_SETTINGS.termFontSize;
+    saveSettings();
+    applySettings();
+    repaintTerminals();
+    toast(`terminal zoom ${s.termFontSize}px`);
+  } else {
+    const editor = $("editor");
+    const topLine = s.lineHeight > 0 ? editor.scrollTop / s.lineHeight : 0;
+    s.fontSize = DEFAULT_SETTINGS.fontSize;
+    s.lineHeight = DEFAULT_SETTINGS.lineHeight;
+    saveSettings();
+    applySettings();
+    if (topLine > 0) editor.scrollTop = topLine * s.lineHeight;
+    state.wrapDirty = true;
+    updateHighlight();
+    toast(`editor zoom ${s.fontSize}px`);
+  }
+}
+
+function zoomSurface(surface, delta) {
+  if (surface === "terminal") zoomTerminal(delta);
+  else zoomEditor(delta);
+}
+
+// Returns true when the event was a zoom shortcut.  The caller stops
+// propagation so the terminal never receives a stray "=" or "-" byte.
+function handleZoomKey(event) {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
+  if (event.key === "0") {
+    resetZoom(zoomSurfaceFor(document.activeElement));
+    return true;
+  }
+  if (event.key === "+" || event.key === "=") {
+    zoomSurface(zoomSurfaceFor(document.activeElement), 1);
+    return true;
+  }
+  if (event.key === "-" || event.key === "_") {
+    zoomSurface(zoomSurfaceFor(document.activeElement), -1);
+    return true;
+  }
+  return false;
 }
 
 const SIDEBAR_MIN = 180;
@@ -601,8 +712,8 @@ function updateStatus() {
   $("statusLine").textContent = state.statusEditing
     ? $("statusLine").textContent
     : large
-      ? `Ln ${line}`
-      : `Ln ${line}, Col ${col}`;
+      ? `${line}`
+      : `${line}:${col}`;
   $("statusSel").textContent = selected ? `Sel ${selected}` : "";
   $("statusLang").textContent = state.engineReady ? (state.engine.language || "plain") : "plain";
   $("statusSize").textContent = formatBytes(
@@ -3193,8 +3304,9 @@ function goToLine() {
 // Jump by line number without materialising the document as an array of
 // lines: a 200k-line buffer should not allocate 200k JS strings just to find
 // one offset.  Large mode gets a virtual-scrollbar jump instead.
-function jumpToLine(wanted) {
+function jumpToLine(wanted, column = 1) {
   wanted = Math.max(1, Math.min(state.engineReady ? state.engine.lineCount : 1, wanted | 0));
+  column = Math.max(1, column | 0);
   if (state.largeMode) {
     const scroll = $("largeScroll");
     const { lineHeight } = fontSizeMetrics();
@@ -3217,6 +3329,9 @@ function jumpToLine(wanted) {
     if (nl < 0) break;
     offset = nl + 1;
   }
+  const lineEnd = text.indexOf("\n", offset);
+  const end = lineEnd < 0 ? text.length : lineEnd;
+  offset = Math.min(offset + column - 1, end);
   editor.focus();
   editor.setSelectionRange(offset, offset);
   revealSelection();
@@ -3247,9 +3362,11 @@ function endStatusEdit(commit) {
   const typed = el.textContent;
   el.contentEditable = "false";
   el.classList.remove("editing");
-  const match = commit ? typed.match(/(\d+)/) : null;
+  const match = commit ? typed.match(/(\d+)(?:\s*[:,\s]\s*(\d+))?/) : null;
   updateStatus();
-  if (match) jumpToLine(parseInt(match[1], 10));
+  if (match) {
+    jumpToLine(parseInt(match[1], 10), match[2] ? parseInt(match[2], 10) : 1);
+  }
 }
 
 /* ---------------------------------------------------------------- settings */
@@ -3259,6 +3376,7 @@ function populateSettingsForm() {
   $("setTheme").value = s.theme;
   $("setFontSize").value = String(s.fontSize);
   $("setLineHeight").value = String(s.lineHeight);
+  $("setTermFontSize").value = String(Number(s.termFontSize) || DEFAULT_SETTINGS.termFontSize);
   $("setLineNumbers").checked = s.lineNumbers;
   $("setWrap").checked = s.wrap;
   $("setSoftKeyboard").checked = s.softKeyboard;
@@ -3294,6 +3412,7 @@ async function applySettingsForm() {
   s.theme = $("setTheme").value;
   s.fontSize = Math.max(9, Math.min(32, Number($("setFontSize").value) || 13));
   s.lineHeight = Math.max(s.fontSize + 2, Math.min(48, Number($("setLineHeight").value) || 20));
+  s.termFontSize = Math.max(8, Math.min(32, Number($("setTermFontSize").value) || 13));
   s.lineNumbers = $("setLineNumbers").checked;
   s.wrap = $("setWrap").checked;
   s.softKeyboard = $("setSoftKeyboard").checked;
@@ -3863,10 +3982,14 @@ function bindEvents() {
   });
   $("termCopy").addEventListener("click", copyTerminalSelection);
   $("termPaste").addEventListener("click", pasteTerminalClipboard);
+  $("termZoomOut").addEventListener("click", () => zoomTerminal(-1));
+  $("termZoomIn").addEventListener("click", () => zoomTerminal(1));
+  $("termZoomOut").addEventListener("dblclick", () => resetZoom("terminal"));
+  $("termZoomIn").addEventListener("dblclick", () => resetZoom("terminal"));
   // A real pointerdown on a button would move focus and collapse the terminal
   // selection before the click handler can read it.  Suppress the default so
-  // Copy still sees the text the user highlighted.
-  for (const id of ["termCopy", "termPaste"]) {
+  // Copy still sees the text the user highlighted and zoom keeps the caret.
+  for (const id of ["termCopy", "termPaste", "termZoomOut", "termZoomIn"]) {
     const button = $(id);
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("mousedown", (event) => event.preventDefault());
@@ -4125,29 +4248,74 @@ function bindEvents() {
     button.addEventListener("pointerdown", stop);
     button.addEventListener("mousedown", stop);
     button.addEventListener("touchstart", stop, { passive: false });
+    // A long press must not open the mobile context menu or start a text
+    // selection; it is a key repeat gesture.
+    button.addEventListener("contextmenu", stop);
+  }
+
+  // Hold an arrow (or Backspace/Delete/Page) and the caret keeps moving.  The
+  // first repeat is delayed like a desktop keyboard, then repeats quickly.
+  let softRepeatDelay = 0;
+  let softRepeatTimer = 0;
+  const SOFT_REPEAT_KEYS = new Set([
+    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+    "PageUp", "PageDown", "Home", "End", "Backspace", "Delete",
+  ]);
+  function stopSoftRepeat() {
+    if (softRepeatDelay) {
+      clearTimeout(softRepeatDelay);
+      softRepeatDelay = 0;
+    }
+    if (softRepeatTimer) {
+      clearInterval(softRepeatTimer);
+      softRepeatTimer = 0;
+    }
+  }
+  function runSoftKey(name) {
+    if (softKeyboardTargetsTerminal()) {
+      sendTerminalKey(name, state.softMods);
+    } else {
+      const handled = editorKeyCommand(name, state.softMods);
+      if (!handled) {
+        // Native arrow/home/etc. handling for the focused textarea.
+        editor.focus();
+        moveEditorSelection(name);
+      }
+    }
+    if (name !== "") {
+      state.softMods.ctrl = state.softMods.alt = false;
+      updateSoftMods();
+    }
+    keepSoftKeyboardAfterKey(name);
   }
   for (const key of document.querySelectorAll("#softKeyboard [data-key]")) {
     guardSoftKey(key);
     key.addEventListener("pointerdown", (event) => {
       event.preventDefault();
+      if (event.button > 0) return;
+      stopSoftRepeat();
       const name = key.dataset.key;
-      if (softKeyboardTargetsTerminal()) {
-        sendTerminalKey(name, state.softMods);
-      } else {
-        const handled = editorKeyCommand(name, state.softMods);
-        if (!handled) {
-          // Native arrow/home/etc. handling for the focused textarea.
-          editor.focus();
-          moveEditorSelection(name);
-        }
+      runSoftKey(name);
+      if (!SOFT_REPEAT_KEYS.has(name)) return;
+      // Capture the pointer so pointerup still arrives if the finger slides.
+      try {
+        key.setPointerCapture(event.pointerId);
+      } catch {
+        /* older browser without pointer capture */
       }
-      if (key.dataset.mod !== "ctrl" && key.dataset.mod !== "alt") {
-        state.softMods.ctrl = state.softMods.alt = false;
-        updateSoftMods();
-      }
-      keepSoftKeyboardAfterKey(name);
+      softRepeatDelay = setTimeout(() => {
+        softRepeatDelay = 0;
+        softRepeatTimer = setInterval(() => runSoftKey(name), 55);
+      }, 350);
     });
+    key.addEventListener("pointerup", stopSoftRepeat);
+    key.addEventListener("pointercancel", stopSoftRepeat);
+    key.addEventListener("lostpointercapture", stopSoftRepeat);
   }
+  window.addEventListener("pointerup", stopSoftRepeat);
+  window.addEventListener("pointercancel", stopSoftRepeat);
+  window.addEventListener("blur", stopSoftRepeat);
+  document.addEventListener("visibilitychange", stopSoftRepeat);
   for (const key of document.querySelectorAll("#softKeyboard [data-mod]")) {
     guardSoftKey(key);
     key.addEventListener("pointerdown", (event) => {
@@ -4186,6 +4354,31 @@ function bindEvents() {
   });
 
   $("statusWrap").addEventListener("click", toggleWrap);
+
+  $("statusZoomOut").addEventListener("click", () => zoomEditor(-1));
+  $("statusZoomIn").addEventListener("click", () => zoomEditor(1));
+  $("statusZoomOut").addEventListener("dblclick", () => resetZoom("editor"));
+  $("statusZoomIn").addEventListener("dblclick", () => resetZoom("editor"));
+
+  // Ctrl/Cmd + wheel (and a trackpad pinch, which reports ctrlKey) zooms the
+  // pane under the pointer instead of the whole browser page.
+  const bindZoomWheel = (element, surface) => {
+    element.addEventListener("wheel", (event) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      event.preventDefault();
+      zoomSurface(surface, event.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+  };
+  bindZoomWheel($("editorWrap"), "editor");
+  bindZoomWheel($("termStack"), "terminal");
+
+  // Capture phase: handle the shortcut before the editor/terminal keydown
+  // handlers turn "=" or "-" into text or PTY bytes.
+  document.addEventListener("keydown", (event) => {
+    if (!handleZoomKey(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
 
   $("statusEncoding").addEventListener("click", () => {
     if (!state.engineReady) return;
