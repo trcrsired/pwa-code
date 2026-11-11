@@ -196,6 +196,68 @@ body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
 .hist-btn { padding: 5px 8px; font-size: 15px; line-height: 1; }
 button:disabled:hover { background: transparent; }
 
+/* --------------------------------------------------------------- doc tabs */
+
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 30px;
+  padding: 3px 6px 0;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.doc-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 5px 5px 0 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.doc-tab:hover { color: var(--fg); background: var(--hover); }
+.doc-tab.active {
+  color: var(--fg);
+  background: var(--bg);
+  border-color: var(--border);
+}
+.doc-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.doc-tab-dirty { color: var(--accent); font-size: 10px; }
+.doc-tab-close {
+  padding: 0 2px;
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.doc-tab-close:hover { background: var(--hover); color: var(--fg); }
+.doc-tab-new {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+}
+.doc-tab-new:hover { background: var(--hover); color: var(--fg); }
+
 /* ------------------------------------------------------------- layout */
 
 #body {
@@ -663,6 +725,7 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
 .find-bar[hidden] { display: none; }
 .find-bar input[type="text"] { width: 148px; }
 .find-bar .find-case { color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 3px; }
+.find-count { min-width: 54px; color: var(--muted); font-family: var(--mono); font-size: 11px; text-align: center; }
 
 /* syntax classes emitted by cpp/core/syntax.h */
 .t-k { color: var(--k); }
@@ -809,6 +872,48 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
 .term-handle[hidden] { display: none; }
 body.term-resizing { user-select: none; cursor: row-resize; }
 .hex-wrap[hidden], .term-wrap[hidden] { display: none; }
+
+.term-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+}
+.term-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.term-tab.active { color: var(--accent); border-color: var(--accent); background: var(--active); }
+.term-tab-close {
+  padding: 0 2px;
+  border-radius: 3px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.term-tab-close:hover { background: var(--hover); color: var(--fg); }
+.term-stack {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+.term-stack > .term { flex: 1 1 auto; min-width: 0; }
+.term-stack > .term[hidden] { display: none; }
 
 .hex-view {
   flex: 1 1 auto;
@@ -1073,6 +1178,8 @@ body[data-theme="light"] .ansi-white { color: #333; }
 @media (max-width: 720px) {
   .sidebar-handle { display: none; }
   #topbar { height: 44px; gap: 5px; }
+  /* A full-screen terminal owns the whole area, including the file tabs. */
+  body.term-open #tabBar { display: none; }
   .doc-head { border-left: 0; padding-left: 0; }
   #sidebar {
     position: absolute;

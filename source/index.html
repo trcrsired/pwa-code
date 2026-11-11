@@ -33,6 +33,8 @@
     </div>
   </header>
 
+  <div id="tabBar" class="tab-bar" role="tablist" aria-label="Open files"></div>
+
   <div id="body">
     <aside id="sidebar">
       <div class="vol-tabs" role="tablist">
@@ -95,8 +97,10 @@
       <div id="termHandle" class="term-handle" role="separator" aria-orientation="horizontal"
         aria-label="Resize terminal" title="Drag to resize; double-click to reset" hidden></div>
       <div id="termWrap" class="term-wrap" hidden>
+        <div id="termTabs" class="term-tabs" role="tablist" aria-label="Terminal sessions"></div>
         <div class="panel-toolbar">
           <span class="panel-title">Terminal</span>
+          <button id="termNew" class="mini-btn" title="New terminal">+</button>
           <button id="termConnect" class="mini-btn">Connect</button>
           <button id="termClear" class="mini-btn">Clear</button>
           <button id="termCopy" class="mini-btn" title="Copy selected terminal text">Copy</button>
@@ -104,7 +108,9 @@
           <button id="termClose" class="mini-btn">Close</button>
           <span id="termStatus" class="muted">disconnected</span>
         </div>
-        <div id="term" class="term" tabindex="0" aria-label="Terminal"></div>
+        <div id="termStack" class="term-stack">
+          <div id="term" class="term" tabindex="0" aria-label="Terminal"></div>
+        </div>
         <!-- A rendered 1px field is the only reliable way to raise a mobile
              browser's own on-screen keyboard.  It receives the typing and the
              terminal forwards the bytes to the PTY. -->
@@ -119,7 +125,9 @@
         <button id="findNext" class="mini-btn" title="Next (Enter)">↓</button>
         <button id="replaceOne" class="mini-btn">Replace</button>
         <button id="replaceAll" class="mini-btn">All</button>
+        <span id="findCount" class="find-count"></span>
         <label class="find-case"><input id="findCase" type="checkbox"> Aa</label>
+        <label class="find-case"><input id="findWord" type="checkbox"> Word</label>
         <button id="findClose" class="mini-btn" title="Close (Esc)">×</button>
       </div>
     </main>

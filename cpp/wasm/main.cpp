@@ -289,6 +289,24 @@ extern "C"
 	});
 }
 
+// Tabs keep one decoded buffer in the engine and restore the path (and with it
+// the syntax language) when switching.  set_text deliberately leaves the path
+// alone, so these setters round-trip a tab without re-encoding the file.
+[[__gnu__::__visibility__("default")]] void pwa_doc_set_path(::std::uint8_t const *data,
+											   ::std::size_t len) noexcept
+{
+	abi_void([&]() throws {
+		doc.set_path(::fast_io::u8string_view{reinterpret_cast<char8_t const *>(data), len});
+	});
+}
+
+[[__gnu__::__visibility__("default")]] void pwa_doc_set_source_crlf(
+	::std::uint_least32_t value) noexcept
+{
+	clear_error();
+	doc.set_source_crlf(value != 0);
+}
+
 [[__gnu__::__visibility__("default")]] void pwa_doc_insert(::std::size_t offset,
 											 ::std::uint8_t const *data, ::std::size_t len) noexcept
 {

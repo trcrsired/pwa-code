@@ -174,6 +174,22 @@ export class Engine {
     }
   }
 
+  // Restore tab metadata without re-encoding the whole document.
+  setPath(path) {
+    const input = this._putString(path || "");
+    try {
+      this.exports.pwa_doc_set_path(input.ptr, input.len);
+      this._check();
+    } finally {
+      this.exports.pwa_free(input.ptr);
+    }
+  }
+
+  setSourceCrlf(value) {
+    this.exports.pwa_doc_set_source_crlf(value ? 1 : 0);
+    this._check();
+  }
+
   replace(beginByte, endByte, text) {
     const input = this._put(new TextEncoder().encode(text));
     try {

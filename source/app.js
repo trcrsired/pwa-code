@@ -47,8 +47,6 @@ const state = {
   hexMode: false,
   hexOffset: 0,
   hexSelected: -1,
-  term: null,
-  ws: null,
   softMods: { ctrl: false, alt: false },
   autoSaveTimer: 0,
   engineReady: false,
@@ -68,11 +66,14 @@ const state = {
   statusEditing: false,
   clipboard: null,
   fileMenuEntry: null,
-  termQueue: [],
-  termSession: "",
-  termReplay: true,
-  termRetry: 0,
-  termRetryTimer: 0,
+  terms: [],
+  activeTerm: -1,
+  termSeq: 0,
+  tabs: [],
+  tabIndex: -1,
+  tabSeq: 0,
+  tabToken: 0,
+  switchingTab: false,
   softTarget: "editor",
   conflicts: [],
   conflictLines: new Map(),
@@ -179,7 +180,7 @@ function applySettings() {
   refreshConflicts();
   updateHighlight();
   if (state.hexMode) renderHex();
-  if (state.term) resizeTerminal();
+  if (activeTermInst()) resizeTerminal();
 }
 
 const SIDEBAR_MIN = 180;
@@ -223,9 +224,361 @@ function applyTerminalHeight() {
   }
 }
 
+/* ------------------------------------------------------------- doc tabs */
+
+// Tabs are snapshots around a single wasm document.  Switching captures the
+// active buffer, restores the target into the engine, and swaps the textarea,
+// undo stack, selection and scroll position.  Large read-only files are
+// re-read from their volume instead of keeping a multi-megabyte string around.
+function activeTab() {
+  return state.tabs[state.tabIndex] || null;
+}
+
+function createTabData(overrides = {}) {
+  const tab = {
+    id: ++state.tabSeq,
+    path: "",
+    volume: state.volumes.ref(),
+    label: "",
+    langPath: "",
+    text: "",
+    bytes: null,
+    large: false,
+    dirty: false,
+    encoding: 0,
+    bom: false,
+    sourceCrlf: false,
+    eol: 0,
+    docIndent: 0,
+    history: [],
+    historyIndex: -1,
+    historyTime: 0,
+    cursorStart: 0,
+    cursorEnd: 0,
+    scrollTop: 0,
+    scrollLeft: 0,
+    largeFirst: 0,
+  };
+  return Object.assign(tab, overrides);
+}
+
+function tabLabel(tab) {
+  if (!tab) return "untitled";
+  if (tab.path) return baseName(tab.path);
+  if (tab.label) return tab.label;
+  return "untitled";
+}
+
+function updateDocName() {
+  const large = state.largeMode;
+  const tab = activeTab();
+  $("docName").textContent = state.path
+    ? `${state.path}${large ? " (view)" : ""}`
+    : large
+      ? "untitled (view)"
+      : tab && tab.label
+        ? tab.label
+        : "untitled";
+}
+
+function renderTabs() {
+  const bar = $("tabBar");
+  if (!bar) return;
+  bar.textContent = "";
+  state.tabs.forEach((tab, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "doc-tab" + (index === state.tabIndex ? " active" : "");
+    button.dataset.index = String(index);
+    button.title = tab.path || tab.label || "untitled";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", index === state.tabIndex ? "true" : "false");
+    const name = document.createElement("span");
+    name.className = "doc-tab-name";
+    name.textContent = tabLabel(tab);
+    const dirty = document.createElement("span");
+    dirty.className = "doc-tab-dirty";
+    dirty.textContent = "●";
+    dirty.hidden = !tab.dirty;
+    const close = document.createElement("span");
+    close.className = "doc-tab-close";
+    close.textContent = "×";
+    close.title = "Close tab";
+    close.setAttribute("role", "button");
+    close.setAttribute("aria-label", `Close ${tabLabel(tab)}`);
+    button.append(name, dirty, close);
+    bar.appendChild(button);
+  });
+  const add = document.createElement("button");
+  add.type = "button";
+  add.id = "tabNewBtn";
+  add.className = "doc-tab-new";
+  add.textContent = "+";
+  add.title = "New tab";
+  add.setAttribute("aria-label", "New tab");
+  bar.appendChild(add);
+}
+
+function updateTabDirty() {
+  const tab = activeTab();
+  if (tab) tab.dirty = state.dirty;
+  const bar = $("tabBar");
+  const dot = bar && bar.querySelector(
+    `.doc-tab[data-index="${state.tabIndex}"] .doc-tab-dirty`,
+  );
+  if (dot) dot.hidden = !state.dirty;
+}
+
+function captureActiveTab() {
+  const tab = activeTab();
+  if (!tab) return;
+  const editor = $("editor");
+  tab.path = state.path;
+  tab.volume = state.volume;
+  tab.dirty = state.dirty;
+  if (state.engineReady) {
+    tab.encoding = state.engine.encoding;
+    tab.bom = state.engine.bom;
+    tab.sourceCrlf = state.engine.sourceCrlf;
+  }
+  tab.eol = state.settings.eol;
+  tab.docIndent = state.docIndent;
+  tab.history = state.history;
+  tab.historyIndex = state.historyIndex;
+  tab.historyTime = state.historyTime;
+  if (state.largeMode) {
+    tab.large = true;
+    tab.largeFirst = state.largeFirst;
+    tab.text = "";
+  } else {
+    tab.large = false;
+    tab.text = editor.value;
+    tab.cursorStart = editor.selectionStart;
+    tab.cursorEnd = editor.selectionEnd;
+    tab.scrollTop = editor.scrollTop;
+    tab.scrollLeft = editor.scrollLeft;
+  }
+}
+
+// Install a document the caller has already loaded into the engine.
+function adoptLoadedDocument(tab, info, options) {
+  const path = options.path || "";
+  const langPath = options.langPath || path;
+  const large = isLargeDocument(info);
+  tab.path = path;
+  tab.volume = options.volume;
+  tab.label = options.label || "";
+  tab.langPath = langPath;
+  tab.dirty = !!options.dirty;
+  tab.encoding = info.encoding;
+  tab.bom = info.bom;
+  tab.sourceCrlf = info.sourceCrlf;
+  tab.eol = 0;
+  tab.large = large;
+  tab.bytes = options.bytes || null;
+  tab.docIndent = 0;
+  tab.cursorStart = 0;
+  tab.cursorEnd = 0;
+  tab.scrollTop = 0;
+  tab.scrollLeft = 0;
+  tab.largeFirst = 0;
+  state.path = path;
+  state.volume = options.volume;
+  state.dirty = !!options.dirty;
+  state.settings.eol = 0;
+  $("statusEol").textContent = EOL_LABELS[0];
+  if (large) {
+    enterLargeMode(info);
+  } else {
+    exitLargeMode();
+    setEditorText(state.engine.text);
+    tab.text = $("editor").value;
+    tab.docIndent = state.docIndent;
+  }
+  tab.history = state.history;
+  tab.historyIndex = state.historyIndex;
+  tab.historyTime = state.historyTime;
+  updateDirty(tab.dirty);
+  updateDocName();
+  renderTabs();
+  updateHistoryButtons();
+  updateStatus();
+  if (!$("findBar").hidden) refreshFindCount();
+  return large;
+}
+
+async function applyTabData(tab) {
+  const token = ++state.tabToken;
+  if (state.hexMode) closeHex();
+  if (tab.large) {
+    const bytes = tab.bytes || await state.volumes.get(tab.volume).read(tab.path);
+    if (token !== state.tabToken) return;
+    const info = state.engine.load(bytes, tab.langPath || tab.path, -1);
+    enterLargeMode(info);
+    state.path = tab.path;
+    state.volume = tab.volume;
+    state.dirty = false;
+    tab.dirty = false;
+    state.largeFirst = tab.largeFirst;
+    updateDirty(false);
+    updateLargeSpacer();
+    $("largeScroll").scrollTop = tab.largeFirst * state.settings.lineHeight;
+    renderLargeWindow();
+  } else {
+    state.engine.setText(tab.text);
+    state.engine.setPath(tab.langPath || tab.path);
+    state.engine.setEncoding(tab.encoding, tab.bom);
+    state.engine.setSourceCrlf(tab.sourceCrlf);
+    state.engine.setEol(tab.eol);
+    exitLargeMode();
+    const editor = $("editor");
+    editor.value = tab.text;
+    state.prevText = tab.text;
+    state.path = tab.path;
+    state.volume = tab.volume;
+    state.dirty = tab.dirty;
+    state.docIndent = tab.docIndent;
+    state.settings.eol = tab.eol;
+    $("statusEol").textContent = EOL_LABELS[tab.eol] || "Preserve";
+    state.history = tab.history;
+    state.historyIndex = tab.historyIndex;
+    state.historyTime = tab.historyTime;
+    state.wrapDirty = true;
+    editor.scrollTop = tab.scrollTop;
+    editor.scrollLeft = tab.scrollLeft;
+    editor.setSelectionRange(tab.cursorStart, tab.cursorEnd);
+    updateDirty(tab.dirty);
+    refreshConflicts();
+    updateHighlight();
+    renderWindow();
+    updateHistoryButtons();
+  }
+  updateDocName();
+  updateStatus();
+  renderTabs();
+  if (!$("findBar").hidden) refreshFindCount();
+  scheduleSessionSave();
+}
+
+async function switchTab(index, focus = true) {
+  if (index < 0 || index >= state.tabs.length || index === state.tabIndex) return;
+  if (state.switchingTab) return;
+  captureActiveTab();
+  const previous = state.tabIndex;
+  state.switchingTab = true;
+  state.tabIndex = index;
+  try {
+    await applyTabData(state.tabs[index]);
+  } catch (error) {
+    // A missing large file must not leave the tab strip pointing at a buffer
+    // the engine never loaded.
+    state.tabIndex = previous;
+    fail("tab", error);
+    try {
+      await applyTabData(state.tabs[previous]);
+    } catch {
+      /* keep the previous buffer if it cannot be restored either */
+    }
+  } finally {
+    state.switchingTab = false;
+  }
+  if (focus && !state.largeMode) $("editor").focus();
+}
+
+async function newBlankTab() {
+  const current = activeTab();
+  if (current && !state.path && !state.dirty && !state.largeMode && !$("editor").value) {
+    $("editor").focus();
+    return;
+  }
+  captureActiveTab();
+  const tab = createTabData();
+  state.tabs.push(tab);
+  state.tabIndex = state.tabs.length - 1;
+  try {
+    state.engine.setText("");
+  } catch (error) {
+    fail("new tab", error);
+  }
+  exitLargeMode();
+  setEditorText("");
+  state.path = "";
+  state.volume = state.volumes.ref();
+  state.settings.eol = 0;
+  $("statusEol").textContent = EOL_LABELS[0];
+  tab.text = "";
+  tab.history = state.history;
+  tab.historyIndex = state.historyIndex;
+  tab.historyTime = state.historyTime;
+  updateDirty(false);
+  updateDocName();
+  renderTabs();
+  $("editor").focus();
+  scheduleSessionSave();
+}
+
+async function closeTab(index, force = false) {
+  const tab = state.tabs[index];
+  if (!tab) return;
+  if (index === state.tabIndex) captureActiveTab();
+  if (!force && tab.dirty &&
+      !confirm(`Discard unsaved changes to ${tabLabel(tab)}?`)) {
+    return;
+  }
+  const wasActive = index === state.tabIndex;
+  state.tabs.splice(index, 1);
+  if (state.tabs.length === 0) {
+    const fresh = createTabData();
+    state.tabs.push(fresh);
+    state.tabIndex = 0;
+    try {
+      state.engine.setText("");
+    } catch (error) {
+      fail("close tab", error);
+    }
+    exitLargeMode();
+    setEditorText("");
+    state.path = "";
+    state.volume = state.volumes.ref();
+    state.settings.eol = 0;
+    $("statusEol").textContent = EOL_LABELS[0];
+    fresh.text = "";
+    fresh.history = state.history;
+    fresh.historyIndex = state.historyIndex;
+    fresh.historyTime = state.historyTime;
+    updateDirty(false);
+    updateDocName();
+    renderTabs();
+    updateStatus();
+    scheduleSessionSave();
+    return;
+  }
+  if (wasActive) {
+    state.tabIndex = Math.min(index, state.tabs.length - 1);
+    state.switchingTab = false;
+    await applyTabData(state.tabs[state.tabIndex]);
+  } else if (index < state.tabIndex) {
+    state.tabIndex--;
+  }
+  renderTabs();
+  scheduleSessionSave();
+}
+
+// A file or folder was deleted: drop every tab that pointed into it.
+async function dropTabsForPath(path) {
+  for (let i = state.tabs.length - 1; i >= 0; i--) {
+    const tab = state.tabs[i];
+    if (!tab.path) continue;
+    if (tab.path === path || tab.path.startsWith(`${path}/`)) {
+      await closeTab(i, true);
+    }
+  }
+}
+
 function updateDirty(dirty) {
   state.dirty = dirty;
   $("dirtyDot").hidden = !dirty;
+  updateTabDirty();
 }
 
 function updateStatus() {
@@ -259,7 +612,7 @@ function updateStatus() {
     $("statusEncoding").textContent = ENCODINGS[state.engine.encoding] || "UTF-8";
   }
   $("statusWasm").textContent = state.engineReady ? "wasm" : "engine…";
-  $("docName").textContent = state.path ? `${state.path}${large ? " (view)" : ""}` : large ? "untitled (view)" : "untitled";
+  updateDocName();
   updateGutterCursor(line);
 }
 
@@ -890,6 +1243,14 @@ function setEditorText(text) {
   editor.scrollLeft = 0;
   state.wrapDirty = true;
   resetHistory();
+  const tab = activeTab();
+  if (tab) {
+    tab.text = text;
+    tab.docIndent = state.docIndent;
+    tab.history = state.history;
+    tab.historyIndex = state.historyIndex;
+    tab.historyTime = state.historyTime;
+  }
   refreshConflicts();
   updateHighlight();
   updateStatus();
@@ -1144,45 +1505,56 @@ function isLargeDocument(info) {
   return info.size > LARGE_FILE_BYTES || info.lineCount > LARGE_FILE_LINES;
 }
 
-async function openPath(path, quiet = false) {
+async function openPath(path, quiet = false, volumeRef = null) {
+  const ref = volumeRef || state.volumes.ref();
   try {
-    const volume = state.volumes.active();
+    const existing = state.tabs.findIndex((tab) => tab.path === path && tab.volume === ref);
+    if (existing >= 0) {
+      await switchTab(existing);
+      return;
+    }
+    const current = activeTab();
+    const reuse = !!current && !state.path && !state.dirty && !state.largeMode &&
+      !$("editor").value;
+    // Capture before the engine is replaced by the new file.
+    captureActiveTab();
+    const volume = state.volumes.get(ref);
     const bytes = await volume.read(path);
     const info = state.engine.load(bytes, path, -1);
-    state.path = path;
-    state.volume = state.volumes.ref();
-    const large = isLargeDocument(info);
-    if (large) {
-      // Do not materialise the whole document as a JS string or hand it to
-      // the textarea; keep the engine as the source and paint a window.
-      enterLargeMode(info);
-    } else {
-      exitLargeMode();
-      setEditorText(state.engine.text);
-    }
     // Keep the buffer LF.  Preserve means a CRLF source is written back as
     // CRLF and an LF source stays LF; explicit LF/CRLF remains a user choice.
     state.engine.setEol(1);
-    state.settings.eol = 0;
     state.engine.setEol(0);
-    $("statusEol").textContent = EOL_LABELS[0];
-    updateDirty(false);
+    let tab;
+    if (reuse) {
+      tab = current;
+      tab.volume = ref;
+    } else {
+      tab = createTabData({ volume: ref });
+      state.tabs.push(tab);
+      state.tabIndex = state.tabs.length - 1;
+    }
     state.hexMode = false;
     $("hexWrap").hidden = true;
     $("editorWrap").hidden = false;
-    $("docName").textContent = large ? `${path} (view)` : path;
-    if (!large && state.conflicts.length) {
+    adoptLoadedDocument(tab, info, {
+      path,
+      langPath: path,
+      volume: ref,
+      dirty: false,
+    });
+    if (!tab.large && state.conflicts.length) {
       $("conflictPanel").hidden = false;
       renderConflictList();
     }
     toast(
       `${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}` +
-        (large ? " • large file: read-only partial view" : ""),
+        (tab.large ? " • large file: read-only partial view" : ""),
     );
     renderWindow();
     // A full-screen terminal would cover the file that was just chosen.
     if (window.innerWidth <= 720 && terminalVisible()) collapseTerminalPane();
-    if (!large) $("editor").focus();
+    if (!tab.large) $("editor").focus();
     scheduleSessionSave();
   } catch (error) {
     if (!quiet) fail("open", error);
@@ -1415,7 +1787,14 @@ async function pasteEntry(entry) {
           (state.path === clip.path || state.path.startsWith(`${clip.path}/`))) {
         state.path = destPath + state.path.slice(clip.path.length);
         state.volume = destRef;
-        $("docName").textContent = state.path;
+        const tab = activeTab();
+        if (tab) {
+          tab.path = state.path;
+          tab.volume = destRef;
+          tab.langPath = state.path;
+        }
+        updateDocName();
+        renderTabs();
       }
       state.clipboard = null;
     }
@@ -1472,7 +1851,16 @@ async function renameEntry(entry) {
     } else if (state.path.startsWith(`${oldPath}/`)) {
       state.path = newPath + state.path.slice(oldPath.length);
     }
-    if (state.path) $("docName").textContent = state.path;
+    for (const tab of state.tabs) {
+      if (!tab.path) continue;
+      if (tab.path === oldPath) tab.path = newPath;
+      else if (tab.path.startsWith(`${oldPath}/`)) {
+        tab.path = newPath + tab.path.slice(oldPath.length);
+      }
+      tab.langPath = tab.path;
+    }
+    updateDocName();
+    renderTabs();
     if (state.clipboard?.volume === state.volumes.ref()) {
       const clip = state.clipboard;
       if (clip.path === oldPath) {
@@ -1541,11 +1929,7 @@ async function removeEntry(entry) {
   if (!confirm(`Remove ${path}?`)) return;
   try {
     await volume.remove(path, entry.dir);
-    if (state.path === path || state.path.startsWith(`${path}/`)) {
-      state.path = "";
-      updateDirty(false);
-      $("docName").textContent = "untitled";
-    }
+    await dropTabsForPath(path);
     if (state.clipboard) {
       const clip = state.clipboard;
       if (clip.path === path || clip.path.startsWith(`${path}/`)) state.clipboard = null;
@@ -1610,8 +1994,22 @@ async function saveDocument(saveAs = false, ask = false) {
     state.engine.setEol(state.settings.eol);
     const bytes = state.engine.saveText();
     await state.volumes.get(state.volume).write(state.path, bytes);
+    const tab = activeTab();
+    if (tab) {
+      tab.path = state.path;
+      tab.volume = state.volume;
+      tab.langPath = state.path;
+      tab.label = "";
+      tab.text = $("editor").value;
+      tab.docIndent = state.docIndent;
+      tab.encoding = state.engine.encoding;
+      tab.bom = state.engine.bom;
+      tab.sourceCrlf = state.engine.sourceCrlf;
+      tab.eol = state.settings.eol;
+    }
     updateDirty(false);
-    $("docName").textContent = state.path;
+    updateDocName();
+    renderTabs();
     toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
@@ -1621,34 +2019,10 @@ async function saveDocument(saveAs = false, ask = false) {
 
 /* ------------------------------------------------------------------ close */
 
-// Ctrl+W asks for a tab to go away, not for the whole installed app to be
-// torn down with its session, mounts and terminal.  The document is the one
-// tab here, so closing it drops the buffer back to an empty "untitled".
+// Ctrl+W closes the active tab instead of tearing down the installed app.
 function closeDocument() {
   if (!state.engineReady) return;
-  const name = state.path || "untitled";
-  if (state.dirty && !confirm(`Discard unsaved changes to ${name}?`)) return;
-  if (state.hexMode) {
-    state.hexMode = false;
-    $("hexWrap").hidden = true;
-    $("editorWrap").hidden = false;
-  }
-  try {
-    state.engine.setText("");
-  } catch (error) {
-    fail("close", error);
-    return;
-  }
-  exitLargeMode();
-  state.path = "";
-  state.volume = state.volumes.ref();
-  setEditorText("");
-  state.settings.eol = 0;
-  $("statusEol").textContent = EOL_LABELS[0];
-  $("docName").textContent = "untitled";
-  updateDirty(false);
-  scheduleSessionSave();
-  toast(`closed ${name}`);
+  closeTab(state.tabIndex);
 }
 
 /* ------------------------------------------------------------ open files */
@@ -1656,22 +2030,33 @@ function closeDocument() {
 async function openFromFileInput(file) {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
+    const current = activeTab();
+    const reuse = !!current && !state.path && !state.dirty && !state.largeMode &&
+      !$("editor").value;
+    captureActiveTab();
     const info = state.engine.load(bytes, file.name, -1);
-    state.path = "";
-    state.volume = state.volumes.ref();
-    const large = isLargeDocument(info);
-    if (large) {
-      enterLargeMode(info);
+    let tab;
+    if (reuse) {
+      tab = current;
     } else {
-      exitLargeMode();
-      setEditorText(state.engine.text);
+      tab = createTabData();
+      state.tabs.push(tab);
+      state.tabIndex = state.tabs.length - 1;
     }
-    state.settings.eol = 0;
-    $("statusEol").textContent = EOL_LABELS[0];
-    updateDirty(true);
+    state.hexMode = false;
+    $("hexWrap").hidden = true;
+    $("editorWrap").hidden = false;
+    adoptLoadedDocument(tab, info, {
+      path: "",
+      langPath: file.name,
+      label: file.name,
+      volume: state.volumes.ref(),
+      dirty: true,
+      bytes,
+    });
     toast(
       `${file.name} • ${info.encodingName} • unsaved buffer` +
-        (large ? " • large file: read-only partial view" : ""),
+        (tab.large ? " • large file: read-only partial view" : ""),
     );
     renderWindow();
   } catch (error) {
@@ -1786,46 +2171,170 @@ async function saveHex() {
 
 /* -------------------------------------------------------------- terminal */
 
-// The PTY lives in the native server now, so the browser only needs to
-// remember which shell it belongs to.  sessionStorage survives a reload and a
-// background/foreground cycle in the same tab without making a second tab
-// hijack the same shell.
-function terminalSessionId() {
-  if (state.termSession) return state.termSession;
-  let id = "";
-  try {
-    id = sessionStorage.getItem("pwacode.term.session") || "";
-  } catch {
-    /* private mode */
+// Several PTYs can be open at once.  Each instance owns its own renderer,
+// WebSocket, reconnect state and session id; the native server keeps the
+// shells alive independently.  Switching a terminal tab only changes which
+// pane is visible and which socket is kept connected.
+const TERM_SESSIONS_KEY = "pwacode.term.sessions.v1";
+const TERM_LEGACY_KEY = "pwacode.term.session";
+
+function makeTerminalSessionId() {
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    crypto.getRandomValues(bytes);
+    return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  if (!/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
-    const bytes = new Uint8Array(16);
-    if (window.crypto?.getRandomValues) {
-      crypto.getRandomValues(bytes);
-      id = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function activeTermInst() {
+  return state.terms[state.activeTerm] || null;
+}
+
+function terminalVisible() {
+  return !$("termWrap").hidden;
+}
+
+function termInstFromElement(el) {
+  return state.terms.find((inst) => inst.el === el) || null;
+}
+
+function terminalSocketOpen(inst = activeTermInst()) {
+  return !!inst && !!inst.ws && inst.ws.readyState === WebSocket.OPEN;
+}
+
+function saveTerminalSessions() {
+  try {
+    if (state.terms.length) {
+      sessionStorage.setItem(TERM_SESSIONS_KEY, JSON.stringify({
+        active: state.activeTerm,
+        terms: state.terms.map((inst) => ({ id: inst.sessionId, name: inst.name })),
+      }));
+      // Keep the single-session key in sync for older builds and tests.
+      sessionStorage.setItem(TERM_LEGACY_KEY, state.terms[0].sessionId);
     } else {
-      id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+      sessionStorage.removeItem(TERM_SESSIONS_KEY);
+      sessionStorage.removeItem(TERM_LEGACY_KEY);
     }
-    try {
-      sessionStorage.setItem("pwacode.term.session", id);
-    } catch {
-      /* private mode */
-    }
-  }
-  state.termSession = id;
-  return id;
-}
-
-function clearTerminalSession() {
-  state.termSession = "";
-  try {
-    sessionStorage.removeItem("pwacode.term.session");
   } catch {
     /* private mode */
   }
 }
 
-function terminalUrl() {
+function acquireTerminalElement() {
+  const used = new Set(state.terms.map((inst) => inst.el));
+  const first = $("term");
+  if (first && !used.has(first)) return first;
+  const el = document.createElement("div");
+  el.className = "term";
+  el.tabIndex = 0;
+  el.setAttribute("aria-label", "Terminal");
+  $("termStack").appendChild(el);
+  return el;
+}
+
+function createTerminalInstance(options = {}) {
+  const el = acquireTerminalElement();
+  el.hidden = true;
+  el.textContent = "";
+  el.classList.remove("kb-focus");
+  state.termSeq++;
+  const inst = {
+    sessionId: options.sessionId || makeTerminalSessionId(),
+    name: options.name || `Terminal ${state.termSeq}`,
+    el,
+    term: null,
+    ws: null,
+    queue: [],
+    replay: options.replay !== false,
+    retry: 0,
+    retryTimer: 0,
+    status: "disconnected",
+    cols: 0,
+    rows: 0,
+  };
+  inst.term = new Terminal(el, {
+    onData: (data) => {
+      if (terminalSocketOpen(inst)) inst.ws.send(data);
+    },
+  });
+  state.terms.push(inst);
+  return inst;
+}
+
+function restoreTerminalInstances() {
+  if (state.terms.length) return;
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem(TERM_SESSIONS_KEY) || "null");
+  } catch {
+    saved = null;
+  }
+  let entries = saved && Array.isArray(saved.terms)
+    ? saved.terms.filter((entry) =>
+        entry && /^[A-Za-z0-9_-]{8,64}$/.test(entry.id || ""))
+    : [];
+  if (!entries.length) {
+    let legacy = "";
+    try {
+      legacy = sessionStorage.getItem(TERM_LEGACY_KEY) || "";
+    } catch {
+      legacy = "";
+    }
+    if (/^[A-Za-z0-9_-]{8,64}$/.test(legacy)) {
+      entries = [{ id: legacy, name: "Terminal 1" }];
+    }
+  }
+  if (!entries.length) {
+    entries = [{ id: makeTerminalSessionId(), name: "Terminal 1" }];
+  }
+  entries.forEach((entry, index) => {
+    createTerminalInstance({
+      sessionId: entry.id,
+      name: entry.name || `Terminal ${index + 1}`,
+      replay: true,
+    });
+  });
+  const active = saved && Number.isInteger(saved.active) ? saved.active : 0;
+  state.termSeq = Math.max(state.termSeq, entries.length);
+  state.activeTerm = active >= 0 && active < state.terms.length ? active : 0;
+  state.terms.forEach((inst, index) => {
+    inst.el.hidden = index !== state.activeTerm;
+  });
+  renderTerminalTabs();
+  saveTerminalSessions();
+}
+
+function renderTerminalTabs() {
+  const tabs = $("termTabs");
+  if (!tabs) return;
+  tabs.textContent = "";
+  state.terms.forEach((inst, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "term-tab" + (index === state.activeTerm ? " active" : "");
+    button.dataset.index = String(index);
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", index === state.activeTerm ? "true" : "false");
+    const name = document.createElement("span");
+    name.className = "term-tab-name";
+    name.textContent = inst.name;
+    const close = document.createElement("span");
+    close.className = "term-tab-close";
+    close.textContent = "×";
+    close.title = "Close terminal";
+    close.setAttribute("role", "button");
+    close.setAttribute("aria-label", `Close ${inst.name}`);
+    button.append(name, close);
+    tabs.appendChild(button);
+  });
+}
+
+function updateTerminalStatus(inst = activeTermInst()) {
+  $("termStatus").textContent = inst ? (inst.status || "disconnected") : "disconnected";
+}
+
+function terminalUrl(inst) {
   let base = "";
   if (state.settings.termUrl) {
     base = state.settings.termUrl;
@@ -1856,101 +2365,96 @@ function terminalUrl() {
     base = `${proto}//${location.host}/ws/term`;
   }
   const url = new URL(base);
-  url.searchParams.set("session", terminalSessionId());
-  url.searchParams.set("replay", state.termReplay ? "1" : "0");
+  url.searchParams.set("session", inst.sessionId);
+  url.searchParams.set("replay", inst.replay ? "1" : "0");
   return url.toString();
-}
-
-function terminalVisible() {
-  return !$("termWrap").hidden;
-}
-
-function terminalSocketOpen() {
-  return !!state.ws && state.ws.readyState === WebSocket.OPEN;
 }
 
 // A phone (or a browser tab) may be suspended while another app is in front.
 // The PTY WebSocket is frequently closed by the network stack when that
 // happens, so return visits have to re-open it instead of leaving the pane
 // alive but silent.
-function ensureTerminalConnection() {
-  if (!terminalVisible()) return;
-  if (terminalSocketOpen()) return;
-  if (state.ws && state.ws.readyState === WebSocket.CONNECTING) return;
-  connectTerminal();
+function ensureTerminalConnection(inst = activeTermInst()) {
+  if (!inst || !terminalVisible() || inst !== activeTermInst()) return;
+  if (terminalSocketOpen(inst)) return;
+  if (inst.ws && inst.ws.readyState === WebSocket.CONNECTING) return;
+  connectTerminal(inst);
 }
 
-function scheduleTerminalRetry() {
+function scheduleTerminalRetry(inst) {
+  if (!inst || inst !== activeTermInst()) return;
   if (!terminalVisible() || document.hidden) return;
-  if (state.termRetry >= 8) return;
-  if (state.termRetryTimer) return;
-  const delay = Math.min(500 * (2 ** state.termRetry), 4000);
-  state.termRetry++;
-  $("termStatus").textContent = "reconnecting…";
-  state.termRetryTimer = setTimeout(() => {
-    state.termRetryTimer = 0;
-    ensureTerminalConnection();
+  if (inst.retry >= 8) return;
+  if (inst.retryTimer) return;
+  const delay = Math.min(500 * (2 ** inst.retry), 4000);
+  inst.retry++;
+  inst.status = "reconnecting…";
+  if (inst === activeTermInst()) updateTerminalStatus(inst);
+  inst.retryTimer = setTimeout(() => {
+    inst.retryTimer = 0;
+    ensureTerminalConnection(inst);
   }, delay);
 }
 
-function connectTerminal() {
-  if (!terminalVisible()) return;
-  if (state.termRetryTimer) {
-    clearTimeout(state.termRetryTimer);
-    state.termRetryTimer = 0;
+function connectTerminal(inst = activeTermInst()) {
+  if (!inst || !terminalVisible() || inst !== activeTermInst()) return;
+  if (inst.retryTimer) {
+    clearTimeout(inst.retryTimer);
+    inst.retryTimer = 0;
   }
-  if (state.ws) {
-    const old = state.ws;
-    state.ws = null;
+  if (inst.ws) {
+    const old = inst.ws;
+    inst.ws = null;
     try { old.close(); } catch { /* already closed */ }
   }
-  if (!state.term) {
-    state.term = new Terminal($("term"), {
-      onData: (data) => {
-        if (terminalSocketOpen()) state.ws.send(data);
-      },
-    });
-  }
-  const url = terminalUrl();
-  $("termStatus").textContent = "connecting…";
+  const url = terminalUrl(inst);
+  inst.status = "connecting…";
+  updateTerminalStatus(inst);
   try {
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
-    state.ws = ws;
+    inst.ws = ws;
     ws.onopen = () => {
-      if (state.ws !== ws) return;
-      state.termRetry = 0;
-      state.termReplay = false;
-      $("termStatus").textContent = "connected";
-      $("termInput").focus({ preventScroll: true });
+      if (inst.ws !== ws) return;
+      inst.retry = 0;
+      inst.replay = false;
+      inst.status = "connected";
+      if (inst === activeTermInst()) {
+        updateTerminalStatus(inst);
+        $("termInput").focus({ preventScroll: true });
+      }
       // Tell the PTY its size before replaying anything the user typed while
       // the socket was down.
-      resizeTerminal();
-      const pending = state.termQueue;
-      state.termQueue = [];
+      resizeTerminal(inst);
+      const pending = inst.queue;
+      inst.queue = [];
       for (const chunk of pending) {
         try { ws.send(chunk); } catch { /* socket closed again */ }
       }
     };
     ws.onclose = () => {
-      if (state.ws !== ws) return;
-      state.ws = null;
-      $("termStatus").textContent = "disconnected";
-      scheduleTerminalRetry();
+      if (inst.ws !== ws) return;
+      inst.ws = null;
+      inst.status = "disconnected";
+      if (inst === activeTermInst()) updateTerminalStatus(inst);
+      scheduleTerminalRetry(inst);
     };
     ws.onerror = () => {
-      if (state.ws !== ws) return;
-      $("termStatus").textContent = "error";
-      if (state.termRetry === 0) {
-        toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
+      if (inst.ws !== ws) return;
+      inst.status = "error";
+      if (inst === activeTermInst()) {
+        updateTerminalStatus(inst);
+        if (inst.retry === 0) {
+          toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
+        }
       }
     };
     ws.onmessage = (event) => {
-      if (state.ws !== ws) return;
+      if (inst.ws !== ws) return;
       if (typeof event.data === "string") {
-        state.term.feed(event.data);
+        inst.term.feed(event.data);
       } else {
-        state.term.feedBytes(new Uint8Array(event.data));
+        inst.term.feedBytes(new Uint8Array(event.data));
       }
     };
   } catch (error) {
@@ -1958,9 +2462,9 @@ function connectTerminal() {
   }
 }
 
-function resizeTerminal() {
-  if (!state.term) return;
-  const el = $("term");
+function resizeTerminal(inst = activeTermInst()) {
+  if (!inst) return;
+  const el = inst.el;
   // A hidden pane has no layout; measuring it would send a bogus 20x5 size to
   // the PTY.  The next visible resize corrects it.
   if (!el.clientWidth || !el.clientHeight) return;
@@ -1979,83 +2483,166 @@ function resizeTerminal() {
     parseFloat(style.lineHeight) || (parseFloat(style.fontSize) || 13) * 1.25;
   const cols = Math.max(20, Math.floor((el.clientWidth - padX) / charWidth));
   const rows = Math.max(5, Math.floor((el.clientHeight - padY) / lineHeight));
-  state.term.resize(cols, rows);
-  sendTerminalSize(cols, rows);
+  inst.term.resize(cols, rows);
+  sendTerminalSize(inst, cols, rows);
 }
 
 // Text frames are keystrokes, so window changes use a binary control frame:
 // [1, colsHi, colsLo, rowsHi, rowsLo].  The native server turns that into
 // TIOCSWINSZ (or ResizePseudoConsole) before any bytes reach the PTY.
-function sendTerminalSize(cols, rows) {
-  state.termCols = cols;
-  state.termRows = rows;
-  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
-  state.ws.send(
+function sendTerminalSize(inst, cols, rows) {
+  inst.cols = cols;
+  inst.rows = rows;
+  if (!terminalSocketOpen(inst)) return;
+  inst.ws.send(
     new Uint8Array([1, (cols >> 8) & 0xff, cols & 0xff, (rows >> 8) & 0xff, rows & 0xff]),
   );
 }
 
+function activateTerminal(index) {
+  if (index < 0 || index >= state.terms.length) return;
+  const inst = state.terms[index];
+  const previous = activeTermInst();
+  if (previous && previous !== inst) {
+    previous.el.hidden = true;
+    previous.el.classList.remove("kb-focus");
+  }
+  state.activeTerm = index;
+  inst.el.hidden = false;
+  if (document.activeElement === $("termInput")) inst.el.classList.add("kb-focus");
+  renderTerminalTabs();
+  updateTerminalStatus(inst);
+  saveTerminalSessions();
+  if (terminalVisible()) {
+    ensureTerminalConnection(inst);
+    requestAnimationFrame(() => resizeTerminal(inst));
+    if (inst.term.dirty) inst.term.schedule();
+  }
+}
+
+function newTerminalInstance() {
+  if (!state.terms.length) restoreTerminalInstances();
+  const inst = createTerminalInstance();
+  activateTerminal(state.terms.length - 1);
+  if (terminalVisible()) {
+    ensureTerminalConnection(inst);
+    requestAnimationFrame(() => resizeTerminal(inst));
+  }
+  return inst;
+}
+
+function closeTerminalInstance(inst = activeTermInst()) {
+  if (!inst) {
+    hideTerminalPane();
+    return;
+  }
+  if (inst.retryTimer) {
+    clearTimeout(inst.retryTimer);
+    inst.retryTimer = 0;
+  }
+  if (inst.ws) {
+    const ws = inst.ws;
+    inst.ws = null;
+    try {
+      // [3] terminates the server-side shell.  Hiding the pane does not.
+      if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([3]));
+      ws.close();
+    } catch {
+      /* already closed */
+    }
+  }
+  inst.term.clear();
+  inst.el.hidden = true;
+  inst.el.textContent = "";
+  if (inst.el !== $("term")) inst.el.remove();
+  const index = state.terms.indexOf(inst);
+  if (index >= 0) state.terms.splice(index, 1);
+  if (!state.terms.length) {
+    state.activeTerm = -1;
+    saveTerminalSessions();
+    updateTerminalStatus();
+    hideTerminalPane();
+    return;
+  }
+  if (index < state.activeTerm) {
+    state.activeTerm--;
+  } else if (index === state.activeTerm) {
+    state.activeTerm = Math.min(index, state.terms.length - 1);
+  }
+  state.terms.forEach((term, i) => {
+    term.el.hidden = i !== state.activeTerm;
+    if (i === state.activeTerm && document.activeElement === $("termInput")) {
+      term.el.classList.add("kb-focus");
+    }
+  });
+  renderTerminalTabs();
+  updateTerminalStatus();
+  saveTerminalSessions();
+  if (terminalVisible()) {
+    const active = activeTermInst();
+    ensureTerminalConnection(active);
+    requestAnimationFrame(() => resizeTerminal(active));
+  }
+}
+
+function ensureTerminalInstances() {
+  if (!state.terms.length) restoreTerminalInstances();
+}
+
 // On phones the terminal is a full-screen overlay, so a file cannot be seen
-// behind it.  Hide the pane when a file is opened but keep the socket and the
-// server-side shell alive; tapping Terminal brings the same session back.
-function collapseTerminalPane() {
+// behind it.  Hide the pane when a file is opened but keep the sockets and the
+// server-side shells alive; tapping Terminal brings the same sessions back.
+function hideTerminalPane() {
   const wrap = $("termWrap");
   if (wrap.hidden) return;
   wrap.hidden = true;
   $("termHandle").hidden = true;
+  document.body.classList.remove("term-open");
+  $("termInput").blur();
   $("editorWrap").hidden = state.hexMode;
   if (state.hexMode) $("hexWrap").hidden = false;
+}
+
+function collapseTerminalPane() {
+  hideTerminalPane();
 }
 
 function toggleTerminal(show) {
   const wrap = $("termWrap");
   const visible = show ?? wrap.hidden;
-  wrap.hidden = !visible;
-  $("termHandle").hidden = !visible;
-  if (visible && state.hexMode) {
+  if (!visible) {
+    hideTerminalPane();
+    return;
+  }
+  ensureTerminalInstances();
+  wrap.hidden = false;
+  $("termHandle").hidden = false;
+  document.body.classList.add("term-open");
+  if (state.hexMode) {
     closeHex();
   }
   // The code and the terminal share #main when the terminal is open; the
   // divider between them resizes those panes, not the application.
   $("editorWrap").hidden = state.hexMode;
   // On a phone the explorer is a full-screen drawer stacked above #main, so a
-  // terminal opened behind it would be invisible and untappable.  Selecting a
-  // file already closes the drawer; opening the terminal must do the same.
-  if (visible && window.innerWidth <= 720) $("sidebar").classList.add("hidden");
-  if (!visible) {
-    if (state.ws) {
-      const ws = state.ws;
-      state.ws = null;
-      try {
-        // [3] terminates the server-side shell.  Without it the session would
-        // be kept for a later reattach, which is not what Close means.
-        if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([3]));
-        ws.close();
-      } catch {
-        /* already closed */
-      }
-    }
-    if (state.termRetryTimer) {
-      clearTimeout(state.termRetryTimer);
-      state.termRetryTimer = 0;
-    }
-    state.termRetry = 0;
-    state.termQueue = [];
-    clearTerminalSession();
-    state.termReplay = true;
-    if (state.term) state.term.clear();
-    $("termStatus").textContent = "disconnected";
-    $("editorWrap").hidden = state.hexMode;
-    if (state.hexMode) $("hexWrap").hidden = false;
-    return;
+  // terminal opened behind it would be invisible and untappable.
+  if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
+  if (state.activeTerm < 0 || state.activeTerm >= state.terms.length) {
+    state.activeTerm = 0;
   }
+  state.terms.forEach((inst, index) => {
+    inst.el.hidden = index !== state.activeTerm;
+  });
+  renderTerminalTabs();
+  updateTerminalStatus();
   applyTerminalHeight();
   ensureTerminalConnection();
-  requestAnimationFrame(resizeTerminal);
+  requestAnimationFrame(() => resizeTerminal());
 }
 
 function sendTerminalKey(key, mods) {
-  if (!state.term) return;
+  const inst = activeTermInst();
+  if (!inst) return;
   let bytes = keyToBytes({
     key,
     ctrlKey: mods.ctrl,
@@ -2068,15 +2655,17 @@ function sendTerminalKey(key, mods) {
 }
 
 function sendTerminalBytes(bytes) {
-  if (terminalSocketOpen()) {
-    state.ws.send(bytes);
+  const inst = activeTermInst();
+  if (!inst) return;
+  if (terminalSocketOpen(inst)) {
+    inst.ws.send(bytes);
     return;
   }
   // Queue keystrokes typed while the socket is reconnecting from a suspend;
   // onopen replays them after sending the PTY size.
-  state.termQueue.push(bytes);
-  if (state.termQueue.length > 64) state.termQueue.shift();
-  ensureTerminalConnection();
+  inst.queue.push(bytes);
+  if (inst.queue.length > 64) inst.queue.shift();
+  ensureTerminalConnection(inst);
   toast("Terminal reconnecting…", true);
 }
 
@@ -2085,7 +2674,9 @@ function sendTerminalBytes(bytes) {
 function terminalSelectionText() {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed) return "";
-  const term = $("term");
+  const inst = activeTermInst();
+  const term = inst ? inst.el : null;
+  if (!term) return "";
   if (!term.contains(sel.anchorNode) && !term.contains(sel.focusNode)) return "";
   return sel.toString();
 }
@@ -2228,7 +2819,7 @@ function summonOnScreenKeyboard() {
   const active = document.activeElement;
   if (active === $("editor") || active === $("pathBar")) return;
   if (terminalVisible() && (state.softTarget === "terminal" ||
-      active === $("termInput") || active === $("term"))) {
+      active === $("termInput") || $("termStack").contains(active))) {
     $("termInput").focus({ preventScroll: true });
     return;
   }
@@ -2294,7 +2885,7 @@ function softKeyboardTargetsTerminal() {
   if (!terminalVisible()) return false;
   const active = document.activeElement;
   if (active === $("editor") || active === $("pathBar")) return false;
-  if (active === $("termInput") || active === $("term") || $("term").contains(active)) {
+  if (active === $("termInput") || $("termStack").contains(active)) {
     return true;
   }
   return state.softTarget === "terminal";
@@ -2432,46 +3023,96 @@ function openFind(replace) {
   const editor = $("editor");
   const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
   if (selected && !selected.includes("\n")) $("findText").value = selected;
-  ($("findText") || {}).focus?.();
   $("findText").focus();
   $("findText").select();
   if (replace) $("replaceText").focus();
+  refreshFindCount();
 }
 
 function closeFind() {
   $("findBar").hidden = true;
+  $("findCount").textContent = "";
   $("editor").focus();
 }
 
+function isWordChar(ch) {
+  return !!ch && /[A-Za-z0-9_]/.test(ch);
+}
+
+// Literal search only.  The regex toggle will arrive later; keeping this
+// routine free of RegExp also means characters like . * ( ) need no escaping.
+function findMatches(text, needle) {
+  const matches = [];
+  if (!needle) return matches;
+  const caseSensitive = $("findCase").checked;
+  const wholeWord = $("findWord").checked;
+  const haystack = caseSensitive ? text : text.toLowerCase();
+  const target = caseSensitive ? needle : needle.toLowerCase();
+  let from = 0;
+  while (from <= haystack.length) {
+    const at = haystack.indexOf(target, from);
+    if (at < 0) break;
+    const end = at + needle.length;
+    if (!wholeWord || (!isWordChar(text[at - 1]) && !isWordChar(text[end]))) {
+      matches.push(at);
+    }
+    from = at + Math.max(1, target.length);
+  }
+  return matches;
+}
+
+function refreshFindCount() {
+  const count = $("findCount");
+  if (!count) return;
+  if (state.largeMode) {
+    count.textContent = "view";
+    return;
+  }
+  const needle = $("findText").value;
+  if (!needle) {
+    count.textContent = "";
+    return;
+  }
+  const matches = findMatches($("editor").value, needle);
+  count.textContent = matches.length
+    ? `${matches.length} match${matches.length === 1 ? "" : "es"}`
+    : "0";
+}
+
 function findNext(direction = 1) {
+  if (state.largeMode) {
+    toast("Find is unavailable in the large-file view.", true);
+    return;
+  }
   const editor = $("editor");
   const needle = $("findText").value;
   if (!needle) return;
-  const haystack = $("findCase").checked ? editor.value : editor.value.toLowerCase();
-  const target = $("findCase").checked ? needle : needle.toLowerCase();
-  let from;
-  if (direction > 0) {
-    from = editor.selectionEnd;
-    let at = haystack.indexOf(target, from);
-    if (at < 0) at = haystack.indexOf(target, 0);
-    if (at < 0) {
-      toast("not found");
-      return;
-    }
-    editor.setSelectionRange(at, at + needle.length);
-  } else {
-    from = editor.selectionStart;
-    let at = haystack.lastIndexOf(target, Math.max(0, from - 1));
-    if (at < 0) at = haystack.lastIndexOf(target);
-    if (at < 0) {
-      toast("not found");
-      return;
-    }
-    editor.setSelectionRange(at, at + needle.length);
+  const matches = findMatches(editor.value, needle);
+  if (!matches.length) {
+    $("findCount").textContent = "0";
+    toast("not found");
+    return;
   }
+  let index;
+  if (direction > 0) {
+    index = matches.findIndex((at) => at >= editor.selectionEnd);
+    if (index < 0) index = 0;
+  } else {
+    index = -1;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      if (matches[i] < editor.selectionStart) {
+        index = i;
+        break;
+      }
+    }
+    if (index < 0) index = matches.length - 1;
+  }
+  const at = matches[index];
+  editor.setSelectionRange(at, at + needle.length);
   editor.focus();
   revealSelection();
   updateStatus();
+  $("findCount").textContent = `${index + 1}/${matches.length}`;
 }
 
 function revealSelection() {
@@ -2494,47 +3135,47 @@ function revealSelection() {
 }
 
 function replaceOne() {
+  if (state.largeMode) return;
   const editor = $("editor");
   const needle = $("findText").value;
   if (!needle) return;
-  const current = editor.value.slice(editor.selectionStart, editor.selectionEnd);
-  const equal = $("findCase").checked
-    ? current === needle
-    : current.toLowerCase() === needle.toLowerCase();
-  if (!equal) {
+  const matches = findMatches(editor.value, needle);
+  const current = editor.selectionStart;
+  if (!matches.includes(current)) {
     findNext(1);
     return;
   }
   insertAtCursor($("replaceText").value);
+  refreshFindCount();
   findNext(1);
 }
 
 function replaceAll() {
+  if (state.largeMode) {
+    toast("Replace is unavailable in the large-file view.", true);
+    return;
+  }
   const editor = $("editor");
   const needle = $("findText").value;
   if (!needle) return;
   const replacement = $("replaceText").value;
-  let value = editor.value;
-  let count = 0;
-  if ($("findCase").checked) {
-    while (value.includes(needle)) {
-      value = value.replace(needle, replacement);
-      count++;
-    }
-  } else {
-    const re = new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    value = value.replace(re, () => {
-      count++;
-      return replacement;
-    });
-  }
-  if (!count) {
+  const matches = findMatches(editor.value, needle);
+  if (!matches.length) {
     toast("not found");
     return;
   }
-  editor.value = value;
+  const text = editor.value;
+  const pieces = [];
+  let last = 0;
+  for (const at of matches) {
+    pieces.push(text.slice(last, at), replacement);
+    last = at + needle.length;
+  }
+  pieces.push(text.slice(last));
+  editor.value = pieces.join("");
   editor.dispatchEvent(new Event("input"));
-  toast(`replaced ${count}`);
+  refreshFindCount();
+  toast(`replaced ${matches.length}`);
 }
 
 function goToLine() {
@@ -2701,11 +3342,17 @@ function saveSessionNow() {
     sessionSaveTimer = 0;
   }
   try {
+    const tabs = state.tabs
+      .filter((tab) => tab.path)
+      .map((tab) => ({ volume: tab.volume, path: tab.path }));
+    const active = activeTab();
     localStorage.setItem(SESSION_KEY, JSON.stringify({
       volume: state.volumes.ref(),
       dir: state.volumes.path,
       file: state.path || "",
       fileVolume: state.path ? state.volume : "",
+      tabs,
+      active: active && active.path ? { volume: active.volume, path: active.path } : null,
     }));
   } catch {
     /* private mode */
@@ -2749,12 +3396,24 @@ function applySavedLocation(ref, dir) {
 
 // Restore the location of the last edit.  The file wins over the explorer tab:
 // if the user left a file open and then browsed elsewhere, startup returns to
-// the file's folder and opens it again.
+// the file's folder and opens it again.  When several tabs were open, the
+// active one chooses the folder and all of them are reopened.
 function restoreSavedSession() {
   const saved = readSavedSession();
   if (!saved) {
     setVolTab("internal");
     return null;
+  }
+  const savedTabs = Array.isArray(saved.tabs)
+    ? saved.tabs.filter((entry) => entry && entry.path)
+    : [];
+  const active = saved.active && saved.active.path
+    ? saved.active
+    : savedTabs[0] || null;
+  if (active) {
+    if (applySavedLocation(active.volume, parentPath(active.path))) {
+      return { tabs: savedTabs.length ? savedTabs : [active], active };
+    }
   }
   if (saved.file && saved.fileVolume) {
     if (applySavedLocation(saved.fileVolume, parentPath(saved.file))) {
@@ -2796,14 +3455,28 @@ async function init() {
   if (state.engineReady) {
     await seedInternal();
     await refreshFiles();
-    if (!state.path) {
-      setEditorText("");
-      updateDirty(false);
-    }
-    if (restored?.file) {
+    const initial = createTabData();
+    state.tabs.push(initial);
+    state.tabIndex = 0;
+    setEditorText("");
+    state.path = "";
+    state.volume = state.volumes.ref();
+    state.settings.eol = 0;
+    updateDirty(false);
+    renderTabs();
+    if (restored?.tabs?.length) {
+      for (const entry of restored.tabs) {
+        if (entry && entry.path) await openPath(entry.path, true, entry.volume);
+      }
+      if (restored.active) {
+        const index = state.tabs.findIndex((tab) =>
+          tab.path === restored.active.path && tab.volume === restored.active.volume);
+        if (index >= 0) await switchTab(index, false);
+      }
+    } else if (restored?.file) {
       await openPath(restored.file, true);
-      if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
     }
+    if (window.innerWidth <= 720 && state.path) $("sidebar").classList.add("hidden");
   } else {
     await refreshFiles();
   }
@@ -2884,6 +3557,11 @@ function bindEvents() {
   editor.addEventListener("selectionchange", updateStatus);
 
   editor.addEventListener("keydown", (event) => {
+    if (event.key === "F3") {
+      event.preventDefault();
+      findNext(event.shiftKey ? -1 : 1);
+      return;
+    }
     if (
       (event.ctrlKey || event.metaKey) && !event.altKey &&
       (event.key === "z" || event.key === "Z")
@@ -2967,8 +3645,33 @@ function bindEvents() {
   $("replaceOne").addEventListener("click", replaceOne);
   $("replaceAll").addEventListener("click", replaceAll);
   $("findClose").addEventListener("click", closeFind);
+  $("findText").addEventListener("input", refreshFindCount);
+  $("findCase").addEventListener("change", refreshFindCount);
+  $("findWord").addEventListener("change", refreshFindCount);
 
   $("menuBtn").addEventListener("click", () => $("sidebar").classList.toggle("hidden"));
+
+  $("tabBar").addEventListener("click", (event) => {
+    if (event.target.closest("#tabNewBtn")) {
+      newBlankTab();
+      return;
+    }
+    const tab = event.target.closest(".doc-tab");
+    if (!tab) return;
+    const index = Number(tab.dataset.index);
+    if (event.target.closest(".doc-tab-close")) {
+      closeTab(index);
+      return;
+    }
+    switchTab(index);
+  });
+  $("tabBar").addEventListener("auxclick", (event) => {
+    if (event.button !== 1) return;
+    const tab = event.target.closest(".doc-tab");
+    if (!tab) return;
+    event.preventDefault();
+    closeTab(Number(tab.dataset.index));
+  });
 
   // Sidebar drag strip.  The width is written straight to --sidebar-w while the
   // pointer moves and persisted once it is released; double-click forgets it.
@@ -2979,7 +3682,7 @@ function bindEvents() {
     const refreshAfterResize = () => {
       updateHighlight();
       if (state.hexMode) renderHex();
-      if (state.term && !$("termWrap").hidden) resizeTerminal();
+      if (activeTermInst() && !$("termWrap").hidden) resizeTerminal();
     };
     handle.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
@@ -3025,7 +3728,7 @@ function bindEvents() {
     let drag = null;
     const refreshAfterResize = () => {
       updateHighlight();
-      if (state.term && !wrap.hidden) resizeTerminal();
+      if (activeTermInst() && !wrap.hidden) resizeTerminal();
     };
     handle.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
@@ -3151,9 +3854,13 @@ function bindEvents() {
   });
 
   $("termBtn").addEventListener("click", () => toggleTerminal());
-  $("termClose").addEventListener("click", () => toggleTerminal(false));
-  $("termConnect").addEventListener("click", connectTerminal);
-  $("termClear").addEventListener("click", () => state.term && state.term.clearScreen());
+  $("termClose").addEventListener("click", () => closeTerminalInstance());
+  $("termConnect").addEventListener("click", () => connectTerminal(activeTermInst()));
+  $("termNew").addEventListener("click", () => newTerminalInstance());
+  $("termClear").addEventListener("click", () => {
+    const inst = activeTermInst();
+    if (inst) inst.term.clearScreen();
+  });
   $("termCopy").addEventListener("click", copyTerminalSelection);
   $("termPaste").addEventListener("click", pasteTerminalClipboard);
   // A real pointerdown on a button would move focus and collapse the terminal
@@ -3164,14 +3871,16 @@ function bindEvents() {
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("mousedown", (event) => event.preventDefault());
   }
-  $("term").addEventListener("keydown", (event) => {
-    if (terminalClipboardShortcut(event)) return;
-    if (event.key === "Tab") event.preventDefault();
-    const bytes = keyToBytes(event);
-    if (bytes) {
-      event.preventDefault();
-      sendTerminalBytes(bytes);
+  $("termTabs").addEventListener("click", (event) => {
+    const tab = event.target.closest(".term-tab");
+    if (!tab) return;
+    const index = Number(tab.dataset.index);
+    if (event.target.closest(".term-tab-close")) {
+      const inst = state.terms[index];
+      if (inst) closeTerminalInstance(inst);
+      return;
     }
+    activateTerminal(index);
   });
 
   // Tapping the terminal should bring the OS keyboard back after it has been
@@ -3179,36 +3888,40 @@ function bindEvents() {
   // drags and touch long-presses must still be able to select output, so the
   // proxy is focused on a completed tap/click rather than on pointerdown.
   const termInput = $("termInput");
-  const termEl = $("term");
-  const focusTerminalInput = () => {
-    ensureTerminalConnection();
+  const termStack = $("termStack");
+  const focusTerminalInput = (inst = activeTermInst()) => {
+    ensureTerminalConnection(inst);
     // When the OS keyboard's own hide button dismissed it, the proxy often
     // keeps focus.  A no-op focus() would not raise the keyboard again, so
     // blur first; this still happens inside the tap's user gesture.
     if (document.activeElement === termInput) termInput.blur();
     termInput.focus({ preventScroll: true });
   };
-  const terminalHasSelection = () => {
+  const terminalHasSelection = (inst = activeTermInst()) => {
     const sel = window.getSelection();
-    return !!sel && !sel.isCollapsed && !!sel.toString() &&
-      (termEl.contains(sel.anchorNode) || termEl.contains(sel.focusNode));
+    return !!inst && !!sel && !sel.isCollapsed && !!sel.toString() &&
+      (inst.el.contains(sel.anchorNode) || inst.el.contains(sel.focusNode));
   };
   let termPointer = null;
-  termEl.addEventListener("pointerdown", (event) => {
+  termStack.addEventListener("pointerdown", (event) => {
     if (event.button > 0) return;
-    ensureTerminalConnection();
+    const pane = event.target.closest(".term");
+    const inst = (pane && termInstFromElement(pane)) || activeTermInst();
+    if (!inst) return;
+    ensureTerminalConnection(inst);
     termPointer = {
       x: event.clientX,
       y: event.clientY,
       type: event.pointerType,
       moved: false,
+      inst,
     };
     // Freeze repaints while a drag is selecting; the grid must not be
     // replaced mid-drag by a busy program such as top.  Touch long-press
     // selection starts after pointerdown, so hold for every pointer type.
-    if (state.term) state.term.hold = true;
+    inst.term.hold = true;
   });
-  termEl.addEventListener("pointermove", (event) => {
+  termStack.addEventListener("pointermove", (event) => {
     if (!termPointer) return;
     if (Math.abs(event.clientX - termPointer.x) > 3 ||
         Math.abs(event.clientY - termPointer.y) > 3) {
@@ -3218,37 +3931,51 @@ function bindEvents() {
   const endTerminalPointer = (event) => {
     const pointer = termPointer;
     termPointer = null;
-    if (state.term) {
-      state.term.hold = false;
-      if (state.term.dirty) state.term.schedule();
+    if (pointer && pointer.inst.term) {
+      pointer.inst.term.hold = false;
+      if (pointer.inst.term.dirty) pointer.inst.term.schedule();
     }
     if (!pointer) return;
     // A drag is a selection gesture; leave focus (and the selection) alone.
-    if (pointer.moved || terminalHasSelection()) return;
+    if (pointer.moved || terminalHasSelection(pointer.inst)) return;
     // A plain tap/click is the request for the OS keyboard.
     if (event.type === "pointercancel") return;
-    focusTerminalInput();
+    focusTerminalInput(pointer.inst);
   };
   window.addEventListener("pointerup", endTerminalPointer);
   window.addEventListener("pointercancel", endTerminalPointer);
   // iOS is more reliable at raising the keyboard from a click than from a
   // pointerdown, so keep the click as a fallback, but never collapse a
   // selection the user just made.
-  termEl.addEventListener("click", () => {
-    ensureTerminalConnection();
-    if (terminalHasSelection()) return;
+  termStack.addEventListener("click", () => {
+    const inst = activeTermInst();
+    ensureTerminalConnection(inst);
+    if (terminalHasSelection(inst)) return;
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
+  });
+  termStack.addEventListener("keydown", (event) => {
+    if (terminalClipboardShortcut(event)) return;
+    if (event.key === "Tab") event.preventDefault();
+    const bytes = keyToBytes(event);
+    if (bytes) {
+      event.preventDefault();
+      sendTerminalBytes(bytes);
+    }
   });
   // When the selection is dropped, flush any repaint that was held back.
   document.addEventListener("selectionchange", () => {
-    if (state.term && state.term.dirty) state.term.schedule();
+    const inst = activeTermInst();
+    if (inst && inst.term.dirty) inst.term.schedule();
   });
   termInput.addEventListener("focus", () => {
     state.softTarget = "terminal";
-    $("term").classList.add("kb-focus");
+    const inst = activeTermInst();
+    if (inst) inst.el.classList.add("kb-focus");
   });
-  termInput.addEventListener("blur", () => $("term").classList.remove("kb-focus"));
-  $("term").addEventListener("focus", () => { state.softTarget = "terminal"; });
+  termInput.addEventListener("blur", () => {
+    for (const inst of state.terms) inst.el.classList.remove("kb-focus");
+  });
+  termStack.addEventListener("focusin", () => { state.softTarget = "terminal"; });
   $("editor").addEventListener("focus", () => { state.softTarget = "editor"; });
   termInput.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
@@ -3284,13 +4011,13 @@ function bindEvents() {
     applyTerminalHeight();
     updateHighlight();
     if (state.hexMode) renderHex();
-    if (state.term && !$("termWrap").hidden) resizeTerminal();
+    if (activeTermInst() && !$("termWrap").hidden) resizeTerminal();
     positionSoftKeyboard();
   });
   if (window.visualViewport) {
     window.visualViewport.addEventListener("resize", () => {
       positionSoftKeyboard();
-      if (state.term && !$("termWrap").hidden) resizeTerminal();
+      if (activeTermInst() && !$("termWrap").hidden) resizeTerminal();
     });
     window.visualViewport.addEventListener("scroll", positionSoftKeyboard);
   }
@@ -3380,7 +4107,27 @@ function bindEvents() {
 
   $("keyboardBtn").addEventListener("click", () => toggleSoftKeyboard(undefined, true));
   $("skHide").addEventListener("click", () => toggleSoftKeyboard(false));
+  // Mobile browsers dismiss the OS keyboard when a tap lands on a focusable
+  // element, even when pointerdown is cancelled.  Take the buttons out of the
+  // tab order, cancel every pre-focus event, and put the caret back into the
+  // surface that owns the keyboard after each key.
+  function keepSoftKeyboardAfterKey(name) {
+    if (name === "Escape" && !softKeyboardTargetsTerminal()) return;
+    if (softKeyboardTargetsTerminal()) {
+      $("termInput").focus({ preventScroll: true });
+    } else if (!state.largeMode && !state.hexMode) {
+      $("editor").focus({ preventScroll: true });
+    }
+  }
+  function guardSoftKey(button) {
+    button.tabIndex = -1;
+    const stop = (event) => event.preventDefault();
+    button.addEventListener("pointerdown", stop);
+    button.addEventListener("mousedown", stop);
+    button.addEventListener("touchstart", stop, { passive: false });
+  }
   for (const key of document.querySelectorAll("#softKeyboard [data-key]")) {
+    guardSoftKey(key);
     key.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       const name = key.dataset.key;
@@ -3398,14 +4145,17 @@ function bindEvents() {
         state.softMods.ctrl = state.softMods.alt = false;
         updateSoftMods();
       }
+      keepSoftKeyboardAfterKey(name);
     });
   }
   for (const key of document.querySelectorAll("#softKeyboard [data-mod]")) {
+    guardSoftKey(key);
     key.addEventListener("pointerdown", (event) => {
       event.preventDefault();
       const mod = key.dataset.mod;
       state.softMods[mod] = !state.softMods[mod];
       updateSoftMods();
+      keepSoftKeyboardAfterKey("");
     });
   }
 
@@ -3477,15 +4227,14 @@ function bindEvents() {
         $("mountModal").hidden = true;
         return;
       }
-      const term = $("term");
-      if (!$("termWrap").hidden && term.contains(document.activeElement)) return;
+      if (!$("termWrap").hidden && $("termStack").contains(document.activeElement)) return;
       closeDocument();
     },
     true,
   );
 
   window.addEventListener("beforeunload", (event) => {
-    if (state.dirty) {
+    if (state.dirty || state.tabs.some((tab) => tab.dirty)) {
       event.preventDefault();
       event.returnValue = "";
     }
