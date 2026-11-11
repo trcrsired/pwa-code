@@ -71,6 +71,9 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* The app owns the viewport: no page-level scrollbar that would leave a
+   * strip beside the mobile drawer or resize the wrapped editor. */
+  overflow: hidden;
   overscroll-behavior: none;
 }
 
@@ -535,6 +538,10 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
   height: 100%;
   resize: none;
   overflow: auto;
+  /* Reserve the scrollbar column even before the text overflows: otherwise the
+   * content width changes when it appears and the wrapped highlight and the
+   * textarea briefly compute different break points. */
+  scrollbar-gutter: stable;
   background: transparent;
   color: transparent;
   -webkit-text-fill-color: transparent;
@@ -923,9 +930,10 @@ body[data-theme="light"] .ansi-white { color: #333; }
     bottom: 0;
     left: 0;
     z-index: 40;
-    width: min(84vw, 340px);
+    /* The drawer is the whole screen on a phone, not a narrow sidebar. */
+    width: 100%;
     max-width: 100%;
-    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.4);
+    box-shadow: none;
   }
   .file-list { overscroll-behavior: contain; }
   #statusbar { gap: 8px; }

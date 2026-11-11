@@ -53,6 +53,7 @@ const state = {
   wrapLines: null,
   wrapKey: "",
   wrapOffsets: null,
+  wrapWidth: 0,
   wrapDirty: true,
   largeMode: false,
   largeFirst: 0,
@@ -297,6 +298,16 @@ function updateHighlight() {
 // lines an edit actually touched.
 const WRAP_MAP_LIMIT = 20000;
 
+// The textarea's border-box width minus its scrollbar.  clientWidth is an
+// integer, but wrapped text is laid out at the fractional width, so measuring
+// the mirror with clientWidth can disagree with the textarea by sub-pixels
+// and wrap a line at a different character.
+function editorInnerWidth(editor) {
+  const rect = editor.getBoundingClientRect();
+  const chrome = editor.offsetWidth - editor.clientWidth;
+  return Math.max(0, rect.width - chrome);
+}
+
 function wrapMeasureEl() {
   let el = $("wrapMeasure");
   if (!el) {
@@ -313,9 +324,11 @@ function measureWrapRows(lines) {
   const { lineHeight } = fontSizeMetrics();
   const editor = $("editor");
   const el = wrapMeasureEl();
-  // The textarea loses 11px to its scrollbar when the document overflows, so
-  // the mirror has to use the textarea's real content width, not 100%.
-  if (editor.clientWidth > 0) el.style.width = `${editor.clientWidth}px`;
+  // Mirror the textarea's real content width.  clientWidth is rounded and
+  // excludes the scrollbar; a fractional width matters because a one-pixel
+  // difference moves the wrap point and leaves the caret one word off.
+  const inner = editorInnerWidth(editor);
+  if (inner > 0) el.style.width = `${inner}px`;
   el.textContent = "";
   const frag = document.createDocumentFragment();
   for (const text of lines) {
@@ -339,6 +352,8 @@ function refreshWrapRows() {
   const editor = $("editor");
   // A hidden editor has no layout to measure; stay dirty until it comes back.
   if (!editor.clientWidth || !editor.clientHeight) return;
+  const inner = editorInnerWidth(editor);
+  state.wrapWidth = inner;
   const lines = editor.value.split("\n");
   if (lines.length > WRAP_MAP_LIMIT) {
     state.wrapRows = null;
@@ -350,7 +365,7 @@ function refreshWrapRows() {
   const old = state.wrapLines;
   // Wrapping depends on the text, the width and the font metrics; a change to
   // any of them invalidates the whole table, not just the edited lines.
-  const key = `${editor.clientWidth}x${state.settings.fontSize}x${state.settings.lineHeight}`;
+  const key = `${inner.toFixed(2)}x${state.settings.fontSize}x${state.settings.lineHeight}`;
   const sameLayout = state.wrapKey === key;
   let rows;
   if (!old || !state.wrapRows || !sameLayout) {
@@ -491,7 +506,10 @@ function renderWindow() {
   const editor = $("editor");
   const { lineHeight } = fontSizeMetrics();
   const wrap = !!state.settings.wrap;
-  if (wrap && (state.wrapDirty || !state.wrapOffsets)) refreshWrapRows();
+  if (wrap && (state.wrapDirty || !state.wrapOffsets ||
+      Math.abs(state.wrapWidth - editorInnerWidth(editor)) > 0.01)) {
+    refreshWrapRows();
+  }
   const scrollTop = editor.scrollTop;
   const scrollLeft = editor.scrollLeft;
   const rowsTop = scrollTop / lineHeight;
@@ -512,7 +530,7 @@ function renderWindow() {
     return;
   }
   const hl = $("highlight");
-  if (wrap && editor.clientWidth > 0) hl.style.width = `${editor.clientWidth}px`;
+  if (wrap && editor.clientWidth > 0) hl.style.width = `${editorInnerWidth(editor)}px`;
   hl.innerHTML = html;
   const top =
     wrap && state.wrapOffsets && state.wrapOffsets[first] !== undefined
@@ -1005,7 +1023,7 @@ async function newFolder() {
 
 /* ------------------------------------------------------------------ save */
 
-async function saveDocument(saveAs = false) {
+async function saveDocument(saveAs = false, ask = false) {
   if (!state.engineReady) return;
   if (state.largeMode) {
     toast("Large files open in the read-only partial view; edit them with the native CLI.", true);
@@ -1017,6 +1035,10 @@ async function saveDocument(saveAs = false) {
     if (!name) return;
     state.path = name;
     state.volume = state.volumes.ref();
+  } else if (ask) {
+    // Saving overwrites the file on the current volume.  Only the explicit
+    // Save button (and Ctrl+S) asks first; autosave must stay unattended.
+    if (!confirm(`Save changes to ${state.path}?`)) return;
   }
   try {
     syncEditorToEngine();
@@ -1883,7 +1905,7 @@ function bindEvents() {
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
-      saveDocument(false);
+      saveDocument(false, true);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
       event.preventDefault();
       $("fileInput").click();
@@ -2041,7 +2063,7 @@ function bindEvents() {
   $("openBtn").addEventListener("click", () => $("fileInput").click());
   $("undoBtn").addEventListener("click", undo);
   $("redoBtn").addEventListener("click", redo);
-  $("saveBtn").addEventListener("click", () => saveDocument(false));
+  $("saveBtn").addEventListener("click", () => saveDocument(false, true));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
   $("hexClose").addEventListener("click", closeHex);
