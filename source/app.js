@@ -15,7 +15,7 @@ let fileSearchTimer = 0;
 let fileSearchEnginePromise = null;
 
 const DEFAULT_SETTINGS = {
-  theme: "dark",
+  theme: "system",
   fontSize: 13,
   lineHeight: 20,
   termFontSize: 13,
@@ -99,6 +99,7 @@ const state = {
   fileSearchQuery: "",
   fileSearchRunning: false,
   fileSearchPromise: null,
+  fileCollapsed: new Set(),
   docIndent: 0,
 };
 
@@ -164,6 +165,11 @@ function readSettings() {
         Number(state.settings.lineHeight) || DEFAULT_SETTINGS.lineHeight));
       state.settings.termFontSize = Math.max(8, Math.min(72,
         Number(state.settings.termFontSize) || DEFAULT_SETTINGS.termFontSize));
+      // The theme choice grew a "system" option; an unknown stored value
+      // falls back to following the OS.
+      if (state.settings.theme !== "dark" && state.settings.theme !== "light") {
+        state.settings.theme = "system";
+      }
       // Older builds always stored an explicit 0 (two spaces).  Unless the
       // user has touched the indent choice since, default that file to Auto.
       if (!saved.indentExplicit) state.settings.indent = -1;
@@ -173,10 +179,41 @@ function readSettings() {
   }
 }
 
+const SYSTEM_THEME_QUERY = typeof window !== "undefined" && window.matchMedia
+  ? window.matchMedia("(prefers-color-scheme: light)")
+  : null;
+
+// The stored theme may be "system": resolve it against the OS preference at
+// the moment it is applied, so a phone switching to night mode repaints the
+// editor without a reload.
+function resolvedTheme() {
+  const choice = state.settings.theme;
+  if (choice === "dark" || choice === "light") return choice;
+  return SYSTEM_THEME_QUERY && SYSTEM_THEME_QUERY.matches ? "light" : "dark";
+}
+
+function applyTheme() {
+  const theme = resolvedTheme();
+  document.documentElement.dataset.theme = theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", theme === "light" ? "#ffffff" : "#000000");
+}
+
+if (SYSTEM_THEME_QUERY) {
+  const onSystemThemeChange = () => {
+    if (state.settings.theme === "system") applyTheme();
+  };
+  if (SYSTEM_THEME_QUERY.addEventListener) {
+    SYSTEM_THEME_QUERY.addEventListener("change", onSystemThemeChange);
+  } else if (SYSTEM_THEME_QUERY.addListener) {
+    SYSTEM_THEME_QUERY.addListener(onSystemThemeChange);
+  }
+}
+
 function applySettings() {
   const s = state.settings;
   applyBrowserZoom();
-  document.body.dataset.theme = s.theme === "light" ? "light" : "dark";
+  applyTheme();
   document.body.classList.toggle("no-bracket-color", !s.bracketColor);
   document.body.classList.toggle("wrap-mode", !!s.wrap);
   document.documentElement.style.setProperty("--font-size", `${s.fontSize}px`);
@@ -2015,6 +2052,13 @@ function openFileMenu(anchor, entry) {
   state.fileMenuEntry = { anchor, entry };
   anchor.setAttribute("aria-expanded", "true");
 
+  if (entry.dir) {
+    menuButton(menu, "⌕", "Find in folder", () =>
+      startFileSearch(currentEntryPath(entry), false));
+    menuButton(menu, "⇄", "Replace in folder", () =>
+      startFileSearch(currentEntryPath(entry), true));
+    menuSeparator(menu);
+  }
   menuButton(menu, entry.dir ? "▸" : "·", "Open", () => openEntry(entry));
   menuButton(menu, "✎", "Rename", () => renameEntry(entry), !writable || !volume.canRename);
   menuSeparator(menu);
@@ -3470,9 +3514,23 @@ function openFind(replace) {
   if (fileSearchEnabled() && $("findText").value) scheduleFileSearch();
 }
 
+function startFileSearch(root = "", replace = false) {
+  state.fileSearchRoot = root || "";
+  $("findFiles").checked = true;
+  openFind(replace);
+  if (fileSearchTimer) {
+    clearTimeout(fileSearchTimer);
+    fileSearchTimer = 0;
+  }
+  refreshFindCount();
+  if ($("findText").value) runFileSearch();
+}
+
 function closeFind() {
   $("findBar").hidden = true;
   $("findCount").textContent = "";
+  state.fileSearchRoot = "";
+  state.fileCollapsed.clear();
   closeFileFind();
   $("editor").focus();
 }
@@ -3603,6 +3661,7 @@ function findFileMatches(text, needle, caseSensitive, wholeWord, limit) {
     let preview = text.slice(lineStart, lineEnd).replace(/\t/g, " ");
     if (preview.length > 160) preview = `${preview.slice(0, 160)}…`;
     out.push({
+      start: at,
       line: lo + 1,
       column: at - lineStart + 1,
       preview: preview.trim() || " ",
@@ -3677,13 +3736,18 @@ async function doFileSearch() {
     note.textContent = error.message;
     return;
   }
-  // Search the whole mounted volume, not just the folder the explorer happens
-  // to be showing: "find in files" is a project-wide search.
-  const root = "";
+  // Search the whole mounted volume by default; a folder action scopes it to
+  // that folder (state.fileSearchRoot) without changing the volume.
+  const root = state.fileSearchRoot || "";
   state.fileSearchRoot = root;
-  $("fileFindTitle").textContent = `Find in files — ${volume.label}`;
+  $("fileFindTitle").textContent = root
+    ? `Find in folder — ${root}`
+    : `Find in files — ${volume.label}`;
+  state.fileCollapsed.clear();
   const files = [];
   await collectFiles(volume, root, files, 4000);
+  // Stable, path-sorted results keep the tree from jumping between runs.
+  files.sort();
   let engine = null;
   try {
     engine = await getFileSearchEngine();
@@ -3716,10 +3780,17 @@ async function doFileSearch() {
     } else {
       text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
     }
-    // The open file may have unsaved edits; search what the user sees.
+    // The open file may have unsaved edits; search what the user sees.  An
+    // inactive tab keeps its own buffer, which may also differ from disk.
     if (path === state.path && state.volume === ref &&
         !state.largeMode && !state.hexMode) {
       text = $("editor").value;
+    } else {
+      const tab = state.tabs.find(
+        (candidate) => candidate.path === path && candidate.volume === ref &&
+          !candidate.large,
+      );
+      if (tab) text = tab.text;
     }
     const found = findFileMatches(
       text, needle, caseSensitive, wholeWord, MAX_MATCHES - matches.length,
@@ -3749,27 +3820,66 @@ function renderFileFindResults() {
     return;
   }
   if (title) {
-    title.textContent = `Find in files — ${state.fileMatches.length}` +
+    const where = state.fileSearchRoot
+      ? `in folder ${state.fileSearchRoot}`
+      : "in files";
+    title.textContent = `Find ${where} — ${state.fileMatches.length}` +
       `${state.fileMatches.length >= 500 ? "+" : ""} match` +
       `${state.fileMatches.length === 1 ? "" : "es"}`;
   }
+  // Group by file, the way VSCode renders "Search": a collapsible file header
+  // with the path and hit count, then one row per location.
+  const groups = new Map();
   state.fileMatches.forEach((match, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = `file-find-item${index === state.fileMatchIndex ? " active" : ""}`;
-    const head = document.createElement("span");
-    head.className = "file-find-path";
-    head.textContent = match.path;
-    const loc = document.createElement("span");
-    loc.className = "file-find-line";
-    loc.textContent = `${match.line}:${match.column}`;
-    const preview = document.createElement("span");
-    preview.className = "file-find-preview";
-    preview.textContent = match.preview;
-    row.append(head, loc, preview);
-    row.addEventListener("click", () => openFileMatch(index));
-    list.appendChild(row);
+    let group = groups.get(match.path);
+    if (!group) {
+      group = { path: match.path, entries: [] };
+      groups.set(match.path, group);
+    }
+    group.entries.push({ match, index });
   });
+  const rootPrefix = state.fileSearchRoot ? `${state.fileSearchRoot}/` : "";
+  for (const group of groups.values()) {
+    const collapsed = state.fileCollapsed.has(group.path);
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "file-find-group";
+    head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    head.title = group.path;
+    const caret = document.createElement("span");
+    caret.className = "file-find-caret";
+    caret.textContent = collapsed ? "▸" : "▾";
+    const path = document.createElement("span");
+    path.className = "file-find-path";
+    path.textContent = rootPrefix && group.path.startsWith(rootPrefix)
+      ? group.path.slice(rootPrefix.length)
+      : group.path;
+    const count = document.createElement("span");
+    count.className = "file-find-count";
+    count.textContent = String(group.entries.length);
+    head.append(caret, path, count);
+    head.addEventListener("click", () => {
+      if (state.fileCollapsed.has(group.path)) state.fileCollapsed.delete(group.path);
+      else state.fileCollapsed.add(group.path);
+      renderFileFindResults();
+    });
+    list.appendChild(head);
+    if (collapsed) continue;
+    for (const { match, index } of group.entries) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = `file-find-item${index === state.fileMatchIndex ? " active" : ""}`;
+      const loc = document.createElement("span");
+      loc.className = "file-find-line";
+      loc.textContent = `${match.line}:${match.column}`;
+      const preview = document.createElement("span");
+      preview.className = "file-find-preview";
+      preview.textContent = match.preview;
+      row.append(loc, preview);
+      row.addEventListener("click", () => openFileMatch(index));
+      list.appendChild(row);
+    }
+  }
 }
 
 async function openFileMatch(index) {
@@ -3796,7 +3906,9 @@ function refreshFindCount() {
   const count = $("findCount");
   if (!count) return;
   if (fileSearchEnabled()) {
-    count.textContent = $("findText").value ? "files" : "";
+    count.textContent = $("findText").value
+      ? (state.fileSearchRoot ? "folder" : "files")
+      : "";
     return;
   }
   if (state.largeMode) {
@@ -3888,9 +4000,182 @@ function revealSelection() {
   }
 }
 
+/* ---- replacing across files ---- */
+
+// A replacement must not race the background search: both use the same lazy
+// wasm engine, and a half-run search would report stale offsets.
+async function quiesceFileSearch() {
+  if (fileSearchTimer) {
+    clearTimeout(fileSearchTimer);
+    fileSearchTimer = 0;
+  }
+  state.fileSearchToken++;
+  const pending = state.fileSearchPromise;
+  if (pending) {
+    try {
+      await pending;
+    } catch {
+      /* the search failed; replacement still works from the matches we have */
+    }
+  }
+}
+
+async function replaceTextInFile(volume, path, transform) {
+  const bytes = await volume.read(path);
+  let engine = null;
+  try {
+    engine = await getFileSearchEngine();
+  } catch {
+    engine = null;
+  }
+  let text;
+  if (engine) {
+    engine.load(bytes, path, -1);
+    text = engine.text;
+  } else {
+    text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  }
+  const next = transform(text);
+  if (next === text) return false;
+  if (engine) {
+    // Re-encode through the document engine so the file keeps its BOM,
+    // encoding and source line endings.
+    engine.setText(next);
+    await volume.write(path, engine.saveText());
+  } else {
+    await volume.write(path, new TextEncoder().encode(next));
+  }
+  return true;
+}
+
+// Apply the given matches (which carry JS-string offsets) to their files.
+// Open documents are edited in memory so undo still works and nothing is
+// saved behind the user's back; closed files are rewritten through the
+// encoding-preserving engine.
+async function applyFileMatches(matches, needle, replacement) {
+  if (!matches.length) return 0;
+  captureActiveTab();
+  const groups = new Map();
+  for (const match of matches) {
+    const key = `${match.volume}\u0000${match.path}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { volume: match.volume, path: match.path, starts: [] };
+      groups.set(key, group);
+    }
+    group.starts.push(match.start);
+  }
+  let applied = 0;
+  for (const group of groups.values()) {
+    const volume = state.volumes.get(group.volume);
+    if (!volume || volume.readOnly) continue;
+    // Replace from the end so earlier offsets stay valid.
+    const starts = group.starts.sort((a, b) => b - a);
+    if (group.path === state.path && group.volume === state.volume &&
+        !state.largeMode && !state.hexMode) {
+      const editor = $("editor");
+      for (const at of starts) {
+        editor.setRangeText(replacement, at, at + needle.length, "preserve");
+      }
+      editor.dispatchEvent(new Event("input"));
+      applied += starts.length;
+      continue;
+    }
+    const tab = state.tabs.find(
+      (candidate) => candidate.path === group.path && candidate.volume === group.volume,
+    );
+    if (tab) {
+      if (tab.large) continue;
+      let text = tab.text;
+      for (const at of starts) {
+        text = text.slice(0, at) + replacement + text.slice(at + needle.length);
+      }
+      tab.text = text;
+      tab.dirty = true;
+      // The old undo stack describes the pre-replacement text.
+      tab.history = [];
+      tab.historyIndex = -1;
+      tab.historyTime = 0;
+      applied += starts.length;
+      continue;
+    }
+    try {
+      const changed = await replaceTextInFile(volume, group.path, (text) => {
+        let out = text;
+        for (const at of starts) {
+          out = out.slice(0, at) + replacement + out.slice(at + needle.length);
+        }
+        return out;
+      });
+      if (changed) applied += starts.length;
+    } catch (error) {
+      console.error("replace in file", group.path, error);
+    }
+  }
+  if (applied) {
+    renderTabs();
+    scheduleBackupSave();
+  }
+  return applied;
+}
+
+async function replaceFileMatch(index) {
+  const needle = $("findText").value;
+  if (!needle) return;
+  await quiesceFileSearch();
+  if (!state.fileMatches.length || state.fileSearchQuery !== needle) {
+    await runFileSearch();
+  }
+  if (!state.fileMatches.length) {
+    toast("not found");
+    return;
+  }
+  if (index < 0 || index >= state.fileMatches.length) index = 0;
+  const match = state.fileMatches[index];
+  const volume = state.volumes.get(match.volume);
+  if (!volume || volume.readOnly) {
+    toast("This volume is read-only.", true);
+    return;
+  }
+  const replacement = $("replaceText").value;
+  const applied = await applyFileMatches([match], needle, replacement);
+  if (!applied) {
+    toast("could not replace", true);
+    return;
+  }
+  await runFileSearch();
+  state.fileMatchIndex = state.fileMatches.length
+    ? Math.min(index, state.fileMatches.length - 1)
+    : -1;
+  renderFileFindResults();
+  toast("replaced 1");
+}
+
+async function replaceAllFiles() {
+  const needle = $("findText").value;
+  const replacement = $("replaceText").value;
+  if (!needle) return;
+  await quiesceFileSearch();
+  if (!state.fileMatches.length || state.fileSearchQuery !== needle) {
+    await runFileSearch();
+  }
+  if (!state.fileMatches.length) {
+    toast("not found");
+    return;
+  }
+  const matches = state.fileMatches.slice();
+  const hasReadOnly = matches.some((match) => state.volumes.get(match.volume)?.readOnly);
+  if (hasReadOnly) {
+    toast("Skipping matches on read-only volumes.", true);
+  }
+  const applied = await applyFileMatches(matches, needle, replacement);
+  await runFileSearch();
+  toast(`replaced ${applied}`);
+}
+
 function replaceOne() {
   if (fileSearchEnabled()) {
-    toast("Uncheck Files to replace in the open file.", true);
+    replaceFileMatch(state.fileMatchIndex);
     return;
   }
   if (state.largeMode) return;
@@ -3910,7 +4195,7 @@ function replaceOne() {
 
 function replaceAll() {
   if (fileSearchEnabled()) {
-    toast("Uncheck Files to replace in the open file.", true);
+    replaceAllFiles();
     return;
   }
   if (state.largeMode) {
@@ -4526,7 +4811,7 @@ int main() {
       "notes.md",
       new TextEncoder().encode(
         "# PWA Code\n\n" +
-          "- Dark theme is full black; light theme is full white.\n" +
+          "- The theme follows the OS by default; dark is full black, light is full white.\n" +
           "- Internal, external and remote volumes.\n" +
           "- Notepad++ keyword tables and depth-coloured brackets.\n" +
           "- Hex editor and async PTY terminal.\n",
@@ -4624,6 +4909,11 @@ function bindEvents() {
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") {
       event.preventDefault();
       $("fileInput").click();
+    } else if ((event.ctrlKey || event.metaKey) && event.shiftKey &&
+               event.key.toLowerCase() === "f") {
+      // VSCode-style: search the folder the explorer is showing.
+      event.preventDefault();
+      startFileSearch(state.volumes.path || "", false);
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
       event.preventDefault();
       openFind(false);
@@ -4675,6 +4965,7 @@ function bindEvents() {
     if (fileSearchEnabled()) scheduleFileSearch();
   });
   $("findFiles").addEventListener("change", () => {
+    if (!$("findFiles").checked) state.fileSearchRoot = "";
     refreshFindCount();
     if (fileSearchEnabled()) {
       if ($("findText").value) runFileSearch();
@@ -5116,6 +5407,8 @@ function bindEvents() {
     await refreshFiles();
   });
   $("refreshBtn").addEventListener("click", refreshFiles);
+  $("findDirBtn").addEventListener("click", () =>
+    startFileSearch(state.volumes.path || "", false));
 
   // Path bar: Enter navigates (or opens the file it names), Esc and blur
   // discard the edit and put the canonical path back.  The typed text is
@@ -5287,12 +5580,6 @@ function bindEvents() {
     populateSettingsForm();
     applySettings();
     toast("settings reset");
-  });
-
-  $("themeBtn").addEventListener("click", () => {
-    state.settings.theme = state.settings.theme === "dark" ? "light" : "dark";
-    saveSettings();
-    applySettings();
   });
 
   $("statusWrap").addEventListener("click", toggleWrap);

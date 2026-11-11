@@ -19,9 +19,13 @@ shipped as an installable PWA, plus an async native coding server.
 - **Encodings** — UTF-8, UTF-8LE, UTF-16LE/BE, UTF-32LE/BE, GB18030,
   UTF-EBCDIC, BOM detection.  Internally always UTF-8 + LF; save re-encodes with
   the source policy.
-- **Editing** — Notepad++ keyword sets (36 languages), VSCode-style bracket depth colours, find/replace, go to
-  line, hex editor, extra-key row (Esc/Tab/Ctrl/Alt/arrows) that also raises
-  the device's on-screen keyboard.
+- **Editing** — Notepad++ keyword sets (36 languages), VSCode-style bracket
+  depth colours, find/replace, find/replace across a folder with grouped
+  VSCode-style results and replace one/all, go to line, hex editor, extra-key
+  row (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's on-screen
+  keyboard.
+- **Themes** — full-black dark or full-white light; the default follows the
+  OS colour scheme and repaints live when it changes.
 - **Terminal** — native async PTY over WebSocket.
 - **Errors** — herbceptions only (`throws` / `catch throws (::std::error e)`);
   no errno-style status returns.  Native builds use `-fno-exceptions -fno-rtti

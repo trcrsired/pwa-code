@@ -15,7 +15,8 @@ Build **pwa code**, a complete installable code editor:
   filesystem volume, and a PTY terminal over WebSocket;
 - a browser frontend that works on touch, mobile, desktop, tablet and VR;
 - no third-party code inside the player (build tooling may use Node/npm);
-- exactly two themes: black-on-white text and white-on-black text.
+- exactly two themes: black-on-white text and white-on-black text; the default
+  choice follows the OS colour scheme.
 
 ## 2. Hard constraints
 
@@ -66,11 +67,16 @@ filesystem header is opt-in and is not linked into it.
 ### UI
 
 - Only `dark` and `light` themes.  Dark = full black background + white text;
-  light = full white background + black text.
+  light = full white background + black text.  The default `system` setting
+  follows `prefers-color-scheme` and repaints live when the OS changes.
 - Indentation is either 2 spaces or a tab.  No other widths.
 - Keyword lists are generated from Notepad++ defaults; `throws` and
   `return_failure` are added to C++.
 - Bracket colouring follows VSCode depth colours (`t-b0..t-b2`), toggleable.
+- Find/replace is literal.  It works in the open file or, from the explorer's
+  folder menu (or `Ctrl+Shift+F`), across that folder with VSCode-style results
+  grouped by file.  Replace one/all edits open buffers in memory and rewrites
+  closed files through the encoding-preserving engine.
 - The editor is a real `<textarea>` for selection/IME/accessibility, overlaid on
   a wasm-rendered highlighted underlay.  Only the visible line window is
   rendered (refterm-style partial view).
