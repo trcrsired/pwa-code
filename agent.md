@@ -99,10 +99,11 @@ filesystem header is opt-in and is not linked into it.
   on the terminal refocus it.  `visualViewport` keeps the extra row above the
   OS keyboard rather than behind it; `--softkb-h` carries its measured height
   so the app padding and a full-screen terminal shrink by exactly that much.
-- The terminal toolbar's ⛶ button toggles a full-screen pane: `body.term-max`
-  hides the top bar, document tabs, status bar and sidebar and pins
-  `#termWrap` to the viewport.  The terminal's own session tabs, status text
-  and every toolbar action except the floating ⤡ restore button are hidden
+- The terminal toolbar's full-screen button (an SVG expand/collapse icon, so
+  it renders on every desktop font stack) toggles a full-screen pane:
+  `body.term-max` hides the top bar, document tabs, status bar and sidebar and
+  pins `#termWrap` to the viewport.  The terminal's own session tabs, status
+  text and every toolbar action except the floating restore button are hidden
   too, so only shell rows remain.  The pane also ends above the soft-key row
   and the OS keyboard, and the PTY is re-measured when they appear or go away.
   Focus returns to the shell, and hiding/closing the pane clears the state.

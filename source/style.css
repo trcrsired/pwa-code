@@ -1009,6 +1009,9 @@ body.term-max #termMax {
 body.term-max #termMax:hover { opacity: 1; }
 body.term-max .term-stack { padding-top: 26px; }
 #termMax[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+#termMax .tm-restore { display: none; }
+#termMax[aria-pressed="true"] .tm-expand { display: none; }
+#termMax[aria-pressed="true"] .tm-restore { display: inline; }
 .term-handle {
   flex: 0 0 9px;
   position: relative;

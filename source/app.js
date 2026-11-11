@@ -2955,7 +2955,6 @@ function setTerminalMaximized(on) {
   document.body.classList.toggle("term-max", next);
   const button = $("termMax");
   if (button) {
-    button.textContent = next ? "⤡" : "⛶";
     button.title = next ? "Restore terminal size" : "Maximize terminal";
     button.setAttribute("aria-label", next ? "Restore terminal size" : "Maximize terminal");
     button.setAttribute("aria-pressed", next ? "true" : "false");
