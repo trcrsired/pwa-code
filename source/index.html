@@ -92,6 +92,8 @@
         <div id="hexView" class="hex-view"></div>
       </div>
 
+      <div id="termHandle" class="term-handle" role="separator" aria-orientation="horizontal"
+        aria-label="Resize terminal" title="Drag to resize; double-click to reset" hidden></div>
       <div id="termWrap" class="term-wrap" hidden>
         <div class="panel-toolbar">
           <span class="panel-title">Terminal</span>
@@ -122,7 +124,7 @@
   </div>
 
   <footer id="statusbar">
-    <span id="statusLine">Ln 1, Col 1</span>
+    <span id="statusLine" class="status-line" title="Line and column — click and type a line number to jump" aria-label="Line and column; click and type a line number to jump">Ln 1, Col 1</span>
     <span id="statusSel"></span>
     <span class="spacer"></span>
     <button id="statusEncoding" class="status-btn" title="Change encoding">UTF-8</button>

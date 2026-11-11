@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   termUrl: "",
   termLocalEcho: false,
   sidebarWidth: 0,
+  termHeight: 0,
 };
 
 const EOL_LABELS = ["Preserve", "LF", "CRLF"];
@@ -60,6 +61,7 @@ const state = {
   historyIndex: -1,
   historyTime: 0,
   applyingHistory: false,
+  statusEditing: false,
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -149,6 +151,7 @@ function applySettings() {
   ] || "UTF-8";
   $("statusEol").textContent = EOL_LABELS[s.eol] || "Preserve";
   applySidebarWidth();
+  applyTerminalHeight();
   updateHighlight();
   if (state.hexMode) renderHex();
   if (state.term) resizeTerminal();
@@ -170,6 +173,28 @@ function applySidebarWidth() {
     document.documentElement.style.setProperty("--sidebar-w", `${clampSidebarWidth(width)}px`);
   } else {
     document.documentElement.style.removeProperty("--sidebar-w");
+  }
+}
+
+// The terminal splitter changes only the editor/terminal panes.  0 means use
+// the stylesheet's share of #main, which is what narrow screens want.
+const TERM_MIN = 90;
+const EDITOR_PANE_MIN = 120;
+
+function clampTermHeight(height) {
+  const main = $("main");
+  const max = Math.max(TERM_MIN, (main ? main.clientHeight : 800) - EDITOR_PANE_MIN);
+  return Math.round(Math.max(TERM_MIN, Math.min(max, Number(height) || 0)));
+}
+
+function applyTerminalHeight() {
+  const main = $("main");
+  if (!main) return;
+  const height = Number(state.settings.termHeight) || 0;
+  if (height > 0) {
+    main.style.setProperty("--term-h", `${clampTermHeight(height)}px`);
+  } else {
+    main.style.removeProperty("--term-h");
   }
 }
 
@@ -195,7 +220,11 @@ function updateStatus() {
     col = cursor - lastNl;
     selected = editor.selectionEnd - editor.selectionStart;
   }
-  $("statusLine").textContent = large ? `Ln ${line}` : `Ln ${line}, Col ${col}`;
+  $("statusLine").textContent = state.statusEditing
+    ? $("statusLine").textContent
+    : large
+      ? `Ln ${line}`
+      : `Ln ${line}, Col ${col}`;
   $("statusSel").textContent = selected ? `Sel ${selected}` : "";
   $("statusLang").textContent = state.engineReady ? (state.engine.language || "plain") : "plain";
   $("statusSize").textContent = formatBytes(
@@ -1277,10 +1306,13 @@ function toggleTerminal(show) {
   const wrap = $("termWrap");
   const visible = show ?? wrap.hidden;
   wrap.hidden = !visible;
+  $("termHandle").hidden = !visible;
   if (visible && state.hexMode) {
     closeHex();
   }
-  $("editorWrap").hidden = visible || state.hexMode;
+  // The code and the terminal share #main when the terminal is open; the
+  // divider between them resizes those panes, not the application.
+  $("editorWrap").hidden = state.hexMode;
   if (!visible) {
     if (state.ws) {
       try { state.ws.close(); } catch { /* already closed */ }
@@ -1291,6 +1323,7 @@ function toggleTerminal(show) {
     if (state.hexMode) $("hexWrap").hidden = false;
     return;
   }
+  applyTerminalHeight();
   if (!state.ws) connectTerminal();
   requestAnimationFrame(resizeTerminal);
 }
@@ -1559,7 +1592,20 @@ function goToLine() {
   if (state.largeMode) {
     const text = prompt("Go to line", String(state.largeFirst + 1));
     if (!text) return;
-    const wanted = Math.max(1, Math.min(state.engine.lineCount, parseInt(text, 10) || 1));
+    jumpToLine(parseInt(text, 10) || 1);
+    return;
+  }
+  const text = prompt("Go to line", String($("editor").value.slice(0, $("editor").selectionStart).split("\n").length));
+  if (!text) return;
+  jumpToLine(parseInt(text, 10) || 1);
+}
+
+// Jump by line number without materialising the document as an array of
+// lines: a 200k-line buffer should not allocate 200k JS strings just to find
+// one offset.  Large mode gets a virtual-scrollbar jump instead.
+function jumpToLine(wanted) {
+  wanted = Math.max(1, Math.min(state.engineReady ? state.engine.lineCount : 1, wanted | 0));
+  if (state.largeMode) {
     const scroll = $("largeScroll");
     const { lineHeight } = fontSizeMetrics();
     const visible = Math.ceil(scroll.clientHeight / lineHeight) + 2;
@@ -1573,16 +1619,47 @@ function goToLine() {
     updateHighlight();
     return;
   }
-  const text = prompt("Go to line", String($("editor").value.slice(0, $("editor").selectionStart).split("\n").length));
-  if (!text) return;
-  const wanted = Math.max(1, parseInt(text, 10) || 1);
-  const lines = $("editor").value.split("\n");
+  const editor = $("editor");
+  const text = editor.value;
   let offset = 0;
-  for (let i = 0; i < Math.min(wanted - 1, lines.length); i++) offset += lines[i].length + 1;
-  $("editor").focus();
-  $("editor").setSelectionRange(offset, offset);
+  for (let line = 1; line < wanted; line++) {
+    const nl = text.indexOf("\n", offset);
+    if (nl < 0) break;
+    offset = nl + 1;
+  }
+  editor.focus();
+  editor.setSelectionRange(offset, offset);
   revealSelection();
   updateStatus();
+}
+
+/* Editable position readout: click "Ln N, Col M", type a line number and press
+ * Enter.  It is contenteditable rather than an <input> so the status bar keeps
+ * the exact same visible text it always had. */
+function beginStatusEdit() {
+  const el = $("statusLine");
+  if (state.statusEditing || !state.engineReady) return;
+  state.statusEditing = true;
+  el.classList.add("editing");
+  el.contentEditable = "plaintext-only";
+  el.focus({ preventScroll: true });
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function endStatusEdit(commit) {
+  const el = $("statusLine");
+  if (!state.statusEditing) return;
+  state.statusEditing = false;
+  const typed = el.textContent;
+  el.contentEditable = "false";
+  el.classList.remove("editing");
+  const match = commit ? typed.match(/(\d+)/) : null;
+  updateStatus();
+  if (match) jumpToLine(parseInt(match[1], 10));
 }
 
 /* ---------------------------------------------------------------- settings */
@@ -1896,6 +1973,71 @@ function bindEvents() {
       refreshAfterResize();
     });
   }
+
+  // Editor/terminal splitter.  It changes the height of the two panes inside
+  // #main only; the rest of the app never moves.
+  {
+    const handle = $("termHandle");
+    const main = $("main");
+    const wrap = $("termWrap");
+    let drag = null;
+    const refreshAfterResize = () => {
+      updateHighlight();
+      if (state.term && !wrap.hidden) resizeTerminal();
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      drag = { y: event.clientY, height: wrap.getBoundingClientRect().height };
+      handle.classList.add("dragging");
+      document.body.classList.add("term-resizing");
+      if (handle.setPointerCapture) handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      const height = clampTermHeight(drag.height + (drag.y - event.clientY));
+      main.style.setProperty("--term-h", `${height}px`);
+    });
+    const finish = (event) => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove("dragging");
+      document.body.classList.remove("term-resizing");
+      if (handle.hasPointerCapture && handle.hasPointerCapture(event.pointerId)) {
+        handle.releasePointerCapture(event.pointerId);
+      }
+      state.settings.termHeight = clampTermHeight(wrap.getBoundingClientRect().height);
+      saveSettings();
+      refreshAfterResize();
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("dblclick", () => {
+      state.settings.termHeight = 0;
+      saveSettings();
+      applyTerminalHeight();
+      refreshAfterResize();
+    });
+  }
+
+  // Click the position readout to type a line number.
+  {
+    const line = $("statusLine");
+    line.addEventListener("click", () => beginStatusEdit());
+    line.addEventListener("keydown", (event) => {
+      if (!state.statusEditing) return;
+      if (event.key === "Enter") {
+        event.preventDefault();
+        endStatusEdit(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        endStatusEdit(false);
+      }
+    });
+    line.addEventListener("blur", () => {
+      if (state.statusEditing) endStatusEdit(false);
+    });
+  }
   $("openBtn").addEventListener("click", () => $("fileInput").click());
   $("undoBtn").addEventListener("click", undo);
   $("redoBtn").addEventListener("click", redo);
@@ -1984,6 +2126,7 @@ function bindEvents() {
   });
   window.addEventListener("resize", () => {
     state.wrapDirty = true;
+    applyTerminalHeight();
     updateHighlight();
     if (state.hexMode) renderHex();
     if (state.term && !$("termWrap").hidden) resizeTerminal();

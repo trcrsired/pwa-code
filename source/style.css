@@ -621,6 +621,36 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
   flex-direction: column;
   min-height: 0;
 }
+/* Unlike hex, the terminal is a pane below the editor, not a replacement for
+ * it.  Its height belongs to the drag handle above it. */
+.term-wrap {
+  flex: 0 0 auto;
+  flex-basis: var(--term-h, 42%);
+  min-height: 90px;
+  max-height: calc(100% - 120px);
+}
+.term-handle {
+  flex: 0 0 9px;
+  position: relative;
+  z-index: 20;
+  cursor: row-resize;
+  touch-action: none;
+  background: var(--bg);
+}
+.term-handle::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 4px;
+  height: 1px;
+  background: var(--border);
+  transition: background 0.12s ease;
+}
+.term-handle:hover::after,
+.term-handle.dragging::after { background: var(--accent); }
+.term-handle[hidden] { display: none; }
+body.term-resizing { user-select: none; cursor: row-resize; }
 .hex-wrap[hidden], .term-wrap[hidden] { display: none; }
 
 .hex-view {
@@ -732,6 +762,22 @@ body[data-theme="light"] .ansi-white { color: #333; }
 }
 .status-btn:hover { color: var(--fg); background: var(--hover); }
 .status-btn.on, .status-btn[aria-pressed="true"] { color: var(--accent); }
+/* The position readout doubles as the go-to-line field.  It keeps showing the
+ * same "Ln N, Col M" text, so tests and screen readers see one label. */
+.status-line {
+  cursor: text;
+  padding: 1px 4px;
+  border-radius: 3px;
+  outline: none;
+}
+.status-line:hover { color: var(--fg); background: var(--hover); }
+.status-line.editing {
+  color: var(--fg);
+  background: var(--panel);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  cursor: text;
+  user-select: text;
+}
 
 /* ---------------------------------------------------------- soft keys */
 
