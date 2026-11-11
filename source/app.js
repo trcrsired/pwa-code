@@ -74,6 +74,7 @@ const state = {
   terms: [],
   activeTerm: -1,
   termSeq: 0,
+  termMaximized: false,
   tabs: [],
   tabIndex: -1,
   tabSeq: 0,
@@ -1898,6 +1899,7 @@ async function openPath(path, quiet = false, volumeRef = null) {
     renderWindow();
     // A full-screen terminal would cover the file that was just chosen.
     if (window.innerWidth <= 720 && terminalVisible()) collapseTerminalPane();
+    if (state.termMaximized) setTerminalMaximized(false);
     if (!tab.large) $("editor").focus();
     scheduleSessionSave();
   } catch (error) {
@@ -2940,12 +2942,41 @@ function ensureTerminalInstances() {
   if (!state.terms.length) restoreTerminalInstances();
 }
 
+// Maximize is a view state, not a saved setting: it hides the app chrome and
+// lets the terminal own the whole viewport (including the top bar and status
+// bar).  The terminal toolbar stays visible so the same button restores it.
+function setTerminalMaximized(on) {
+  const wrap = $("termWrap");
+  if (!wrap) return;
+  const next = !!on && !wrap.hidden;
+  state.termMaximized = next;
+  document.body.classList.toggle("term-max", next);
+  const button = $("termMax");
+  if (button) {
+    button.textContent = next ? "⤡" : "⛶";
+    button.title = next ? "Restore terminal size" : "Maximize terminal";
+    button.setAttribute("aria-label", next ? "Restore terminal size" : "Maximize terminal");
+    button.setAttribute("aria-pressed", next ? "true" : "false");
+  }
+  if (!next) applyTerminalHeight();
+  requestAnimationFrame(() => {
+    if (!$("termWrap").hidden) resizeTerminal();
+    positionSoftKeyboard();
+    // The toolbar button took focus; hand it back so typing reaches the shell.
+    if (terminalVisible()) {
+      state.softTarget = "terminal";
+      $("termInput").focus({ preventScroll: true });
+    }
+  });
+}
+
 // On phones the terminal is a full-screen overlay, so a file cannot be seen
 // behind it.  Hide the pane when a file is opened but keep the sockets and the
 // server-side shells alive; tapping Terminal brings the same sessions back.
 function hideTerminalPane() {
   const wrap = $("termWrap");
   if (wrap.hidden) return;
+  if (state.termMaximized) setTerminalMaximized(false);
   wrap.hidden = true;
   $("termHandle").hidden = true;
   document.body.classList.remove("term-open");
@@ -5181,6 +5212,8 @@ function bindEvents() {
   });
 
   $("termBtn").addEventListener("click", () => toggleTerminal());
+  $("termMax").addEventListener("click", () =>
+    setTerminalMaximized(!state.termMaximized));
   $("termClose").addEventListener("click", () => closeTerminalInstance());
   $("termConnect").addEventListener("click", () => connectTerminal(activeTermInst()));
   $("termNew").addEventListener("click", () => newTerminalInstance());

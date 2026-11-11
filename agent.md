@@ -98,6 +98,10 @@ filesystem header is opt-in and is not linked into it.
   textarea proxy receives the OS keyboard and forwards bytes to the PTY; taps
   on the terminal refocus it.  `visualViewport` keeps the extra row above the
   OS keyboard rather than behind it.
+- The terminal toolbar's ⛶ button toggles a full-screen pane: `body.term-max`
+  hides the top bar, document tabs, status bar and sidebar and pins
+  `#termWrap` to the viewport.  The button becomes ⤡ to restore, focus returns
+  to the shell, and hiding/closing the pane clears the state.
 
 ## 3. Layout
 

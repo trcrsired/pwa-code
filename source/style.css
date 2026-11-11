@@ -964,6 +964,24 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
   min-height: 90px;
   max-height: calc(100% - 120px);
 }
+/* Full-screen terminal: hide the application chrome and let the pane own the
+ * viewport.  The terminal toolbar (with the restore button) stays visible. */
+body.term-max #topbar,
+body.term-max #tabBar,
+body.term-max #statusbar,
+body.term-max #sidebar,
+body.term-max #termHandle { display: none !important; }
+body.term-max #termWrap {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  flex: 1 1 auto;
+  flex-basis: auto;
+  max-height: none;
+  min-height: 0;
+  background: var(--bg);
+}
+#termMax[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .term-handle {
   flex: 0 0 9px;
   position: relative;
