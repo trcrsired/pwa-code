@@ -436,6 +436,12 @@ export class Terminal {
   }
 
   feed(text) {
+    // Moving the cursor without changing any cell (arrow keys in readline,
+    // vim motions, CUP/HVP) still has to repaint so the block cursor follows
+    // the shell.  The parser reports those moves as cursorRow/cursorCol
+    // changes rather than dirtying the grid, so compare here.
+    const startRow = this.cursorRow;
+    const startCol = this.cursorCol;
     for (let i = 0; i < text.length; i++) {
       const ch = text[i];
       if (this.state === "osc") {
@@ -492,6 +498,9 @@ export class Terminal {
       } else {
         this.putChar(ch);
       }
+    }
+    if (this.cursorRow !== startRow || this.cursorCol !== startCol) {
+      this.dirty = true;
     }
     this.schedule();
   }

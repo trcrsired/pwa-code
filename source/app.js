@@ -1616,7 +1616,9 @@ function setVolTab(kind) {
 // active mount, and typing a path plus Enter navigates there (or opens the file
 // when the last segment is one).
 function setPathDisplay() {
-  $("pathBar").value = `/${state.volumes.path}`;
+  const value = `/${state.volumes.path}`;
+  if ($("pathBar")) $("pathBar").value = value;
+  if ($("topPath")) $("topPath").value = value;
 }
 
 function normalizeVolumePath(text) {
@@ -1654,6 +1656,28 @@ async function goToTypedPath(text) {
     fail("path", error);
     setPathDisplay();
   }
+}
+
+// The top path box also accepts "internal:/dir", "external:/dir" or
+// "remote:/dir" so a path can switch volumes without opening the sidebar.
+async function goToTypedPathOrVolume(text) {
+  const raw = String(text ?? "").trim();
+  const match = /^(internal|external|remote):(.*)$/i.exec(raw);
+  if (!match) {
+    await goToTypedPath(raw);
+    return;
+  }
+  const kind = match[1].toLowerCase();
+  const rest = match[2];
+  if (kind !== state.volumes.current) {
+    setVolTab(kind);
+    await refreshFiles();
+  }
+  if (normalizeVolumePath(rest) === "" && state.volumes.path === "") {
+    setPathDisplay();
+    return;
+  }
+  await goToTypedPath(rest);
 }
 
 function renderMountBar() {
@@ -3330,6 +3354,9 @@ function deleteForward() {
 /* ------------------------------------------------------------- find/replace */
 
 function openFind(replace) {
+  // On a phone the terminal is a full-screen overlay; searching the document
+  // behind it would show a find bar the user cannot see.
+  if (terminalVisible() && window.innerWidth <= 720) hideTerminalPane();
   const bar = $("findBar");
   bar.hidden = false;
   const editor = $("editor");
@@ -4411,6 +4438,7 @@ function bindEvents() {
   $("redoBtn").addEventListener("click", redo);
   $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
+  $("findBtn").addEventListener("click", () => openFind(false));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
   $("hexClose").addEventListener("click", closeHex);
   $("hexApply").addEventListener("click", hexApply);
@@ -4677,6 +4705,23 @@ function bindEvents() {
     }
   });
   $("pathBar").addEventListener("blur", setPathDisplay);
+
+  // The top path is the same address box, kept in sync with the sidebar one.
+  // Focusing selects the whole path so typing a new one replaces it.
+  $("topPath").addEventListener("focus", () => $("topPath").select());
+  $("topPath").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const typed = $("topPath").value;
+      $("topPath").blur();
+      goToTypedPathOrVolume(typed);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setPathDisplay();
+      $("topPath").blur();
+    }
+  });
+  $("topPath").addEventListener("blur", setPathDisplay);
 
   $("newFileBtn").addEventListener("click", newFile);
   $("newDirBtn").addEventListener("click", newFolder);

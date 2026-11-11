@@ -166,17 +166,25 @@ body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
   min-width: 0;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-weight: 700;
-  letter-spacing: 0.2px;
-  white-space: nowrap;
-}
-.brand-mark {
+/* The editable path replaces the old logo so the top bar keeps its space for
+ * navigation: type a folder to jump there, or a file path to open it. */
+.top-path {
+  flex: 0 1 300px;
+  min-width: 64px;
+  height: 28px;
+  padding: 4px 8px;
   font-family: var(--mono);
-  color: var(--accent);
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.top-path:hover { color: var(--fg); }
+.top-path:focus {
+  color: var(--fg);
+  border-color: var(--accent);
+  outline: none;
 }
 .doc-head {
   display: flex;
@@ -207,7 +215,25 @@ body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
 }
 .tool-btn { white-space: nowrap; }
 .tool-btn.primary { border-color: var(--accent); color: var(--accent); }
-.icon-btn { padding: 5px 8px; font-size: 15px; line-height: 1; }
+.icon-btn {
+  padding: 5px 8px;
+  font-size: 15px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.icon-btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn-ico {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .hist-btn { padding: 5px 8px; font-size: 15px; line-height: 1; }
 button:disabled:hover { background: transparent; }
 
@@ -1194,7 +1220,7 @@ body[data-theme="light"] .ansi-white { color: #333; }
   :root { --sidebar-w: 240px; }
   .top-actions .tool-btn { padding: 5px 7px; }
   #saveAsBtn { display: none; }
-  .brand span:last-child { display: none; }
+  .top-path { flex: 1 1 auto; max-width: none; }
 }
 
 @media (max-width: 720px) {
@@ -1202,7 +1228,9 @@ body[data-theme="light"] .ansi-white { color: #333; }
   #topbar { height: 44px; gap: 5px; }
   /* A full-screen terminal owns the whole area, including the file tabs. */
   body.term-open #tabBar { display: none; }
-  .doc-head { border-left: 0; padding-left: 0; }
+  /* The active tab already shows the file name; give the editable path the
+   * space on a phone instead of duplicating the name. */
+  .doc-head { display: none; }
   #sidebar {
     position: absolute;
     /* #body already starts under the top bar and ends above the status bar.
@@ -1239,7 +1267,10 @@ body[data-theme="light"] .ansi-white { color: #333; }
 
 @media (max-width: 520px) {
   #openBtn { display: none; }
-  .top-actions { gap: 3px; }
+  .top-actions { gap: 2px; }
+  /* Icon-only buttons let the editable path keep a usable width on a phone. */
+  .icon-btn, .hist-btn, .tool-btn { padding: 4px 5px; }
+  #topPath { min-width: 84px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
