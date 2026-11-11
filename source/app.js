@@ -1111,6 +1111,12 @@ async function pasteEntry(entry) {
     await copyTreeBetweenVolume(srcVolume, clip.path, destVolume, destPath, clip.dir);
     if (clip.mode === "cut") {
       await srcVolume.remove(clip.path, clip.dir);
+      if (state.volume === clip.volume &&
+          (state.path === clip.path || state.path.startsWith(`${clip.path}/`))) {
+        state.path = destPath + state.path.slice(clip.path.length);
+        state.volume = destRef;
+        $("docName").textContent = state.path;
+      }
       state.clipboard = null;
     }
     await refreshFiles();
