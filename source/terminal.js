@@ -57,6 +57,9 @@ export class Terminal {
     this.scrollTop = 0;
     this.scrollBottom = -1;
     this.cursorVisible = true;
+    // Set while the user drags a selection so PTY output cannot repaint the
+    // grid out from under the browser's selection.
+    this.hold = false;
     this.clear();
     this.el.classList.add("term-grid");
     this.el.addEventListener("scroll", () => {
@@ -502,6 +505,13 @@ export class Terminal {
   }
 
   render() {
+    // Replacing the DOM would destroy a text selection the user is dragging
+    // or has already made.  Keep the frame dirty and repaint once the drag
+    // ends or the selection is dropped.
+    if (this.hold || this.hasSelection()) {
+      this.dirty = true;
+      return;
+    }
     this.dirty = false;
     const pieces = [];
     for (let row = 0; row < this.lines.length; row++) {
@@ -549,6 +559,12 @@ export class Terminal {
   clearScreen() {
     this.clear();
     this.render();
+  }
+
+  hasSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.toString()) return false;
+    return this.el.contains(sel.anchorNode) || this.el.contains(sel.focusNode);
   }
 }
 

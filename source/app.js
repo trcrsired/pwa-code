@@ -2066,6 +2066,90 @@ function sendTerminalBytes(bytes) {
   toast("Terminal reconnecting…", true);
 }
 
+/* ---------------------------------------------------- terminal clipboard */
+
+function terminalSelectionText() {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return "";
+  const term = $("term");
+  if (!term.contains(sel.anchorNode) && !term.contains(sel.focusNode)) return "";
+  return sel.toString();
+}
+
+function fallbackCopyText(text) {
+  // execCommand is deprecated but is the only option when the async clipboard
+  // API is unavailable (insecure origin, old mobile browser, denied permission).
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+  document.body.appendChild(field);
+  field.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  field.remove();
+  return ok;
+}
+
+async function copyTerminalSelection() {
+  const text = terminalSelectionText();
+  if (!text) {
+    toast("Select terminal text first.", true);
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`copied ${text.length} character${text.length === 1 ? "" : "s"}`);
+  } catch {
+    if (fallbackCopyText(text)) toast(`copied ${text.length} characters`);
+    else toast("Clipboard write was blocked by the browser.", true);
+  }
+}
+
+async function pasteTerminalClipboard() {
+  ensureTerminalConnection();
+  let text = "";
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    // The browser only allows readText from a permissioned secure context.
+    // Keep the terminal focused so the user can use the normal paste shortcut
+    // or the OS context menu instead.
+    $("termInput").focus({ preventScroll: true });
+    toast("Clipboard read was blocked; use Ctrl+V or the context menu.", true);
+    return;
+  }
+  if (!text) return;
+  sendTerminalBytes(text.replace(/\r?\n/g, "\r"));
+  $("termInput").focus({ preventScroll: true });
+}
+
+// Ctrl+Shift+C/V are the terminal conventions.  A plain Ctrl+C with a live
+// selection copies instead of sending SIGINT, which is what users expect
+// after dragging over output.  Without a selection Ctrl+C still interrupts.
+function terminalClipboardShortcut(event) {
+  if (!event.ctrlKey && !event.metaKey) return false;
+  const key = event.key.toLowerCase();
+  if (key === "c" && event.shiftKey) {
+    event.preventDefault();
+    copyTerminalSelection();
+    return true;
+  }
+  if (key === "v" && event.shiftKey) {
+    event.preventDefault();
+    pasteTerminalClipboard();
+    return true;
+  }
+  if (key === "c" && !event.altKey) {
+    const text = terminalSelectionText();
+    if (text) {
+      event.preventDefault();
+      copyTerminalSelection();
+      return true;
+    }
+  }
+  return false;
+}
+
 // Coming back from another app or from a locked phone often leaves the pane
 // with stale dimensions and a dead PTY socket.  Re-measure after the browser
 // has restored the viewport, and retry once more after mobile chrome settles.
@@ -3056,7 +3140,18 @@ function bindEvents() {
   $("termClose").addEventListener("click", () => toggleTerminal(false));
   $("termConnect").addEventListener("click", connectTerminal);
   $("termClear").addEventListener("click", () => state.term && state.term.clearScreen());
+  $("termCopy").addEventListener("click", copyTerminalSelection);
+  $("termPaste").addEventListener("click", pasteTerminalClipboard);
+  // A real pointerdown on a button would move focus and collapse the terminal
+  // selection before the click handler can read it.  Suppress the default so
+  // Copy still sees the text the user highlighted.
+  for (const id of ["termCopy", "termPaste"]) {
+    const button = $(id);
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+    button.addEventListener("mousedown", (event) => event.preventDefault());
+  }
   $("term").addEventListener("keydown", (event) => {
+    if (terminalClipboardShortcut(event)) return;
     if (event.key === "Tab") event.preventDefault();
     const bytes = keyToBytes(event);
     if (bytes) {
@@ -3066,8 +3161,11 @@ function bindEvents() {
   });
 
   // Tapping the terminal should bring the OS keyboard back after it has been
-  // dismissed, and route physical keys to the PTY at the same time.
+  // dismissed, and route physical keys to the PTY at the same time.  Mouse
+  // drags and touch long-presses must still be able to select output, so the
+  // proxy is focused on a completed tap/click rather than on pointerdown.
   const termInput = $("termInput");
+  const termEl = $("term");
   const focusTerminalInput = () => {
     ensureTerminalConnection();
     // When the OS keyboard's own hide button dismissed it, the proxy often
@@ -3076,12 +3174,60 @@ function bindEvents() {
     if (document.activeElement === termInput) termInput.blur();
     termInput.focus({ preventScroll: true });
   };
-  $("term").addEventListener("pointerdown", focusTerminalInput);
-  // iOS is more reliable at raising the keyboard from a click than from a
-  // pointerdown, so make the click a fallback as well.
-  $("term").addEventListener("click", () => {
+  const terminalHasSelection = () => {
+    const sel = window.getSelection();
+    return !!sel && !sel.isCollapsed && !!sel.toString() &&
+      (termEl.contains(sel.anchorNode) || termEl.contains(sel.focusNode));
+  };
+  let termPointer = null;
+  termEl.addEventListener("pointerdown", (event) => {
+    if (event.button > 0) return;
     ensureTerminalConnection();
+    termPointer = {
+      x: event.clientX,
+      y: event.clientY,
+      type: event.pointerType,
+      moved: false,
+    };
+    // Freeze repaints while a drag is selecting; the grid must not be
+    // replaced mid-drag by a busy program such as top.  Touch long-press
+    // selection starts after pointerdown, so hold for every pointer type.
+    if (state.term) state.term.hold = true;
+  });
+  termEl.addEventListener("pointermove", (event) => {
+    if (!termPointer) return;
+    if (Math.abs(event.clientX - termPointer.x) > 3 ||
+        Math.abs(event.clientY - termPointer.y) > 3) {
+      termPointer.moved = true;
+    }
+  });
+  const endTerminalPointer = (event) => {
+    const pointer = termPointer;
+    termPointer = null;
+    if (state.term) {
+      state.term.hold = false;
+      if (state.term.dirty) state.term.schedule();
+    }
+    if (!pointer) return;
+    // A drag is a selection gesture; leave focus (and the selection) alone.
+    if (pointer.moved || terminalHasSelection()) return;
+    // A plain tap/click is the request for the OS keyboard.
+    if (event.type === "pointercancel") return;
+    focusTerminalInput();
+  };
+  window.addEventListener("pointerup", endTerminalPointer);
+  window.addEventListener("pointercancel", endTerminalPointer);
+  // iOS is more reliable at raising the keyboard from a click than from a
+  // pointerdown, so keep the click as a fallback, but never collapse a
+  // selection the user just made.
+  termEl.addEventListener("click", () => {
+    ensureTerminalConnection();
+    if (terminalHasSelection()) return;
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
+  });
+  // When the selection is dropped, flush any repaint that was held back.
+  document.addEventListener("selectionchange", () => {
+    if (state.term && state.term.dirty) state.term.schedule();
   });
   termInput.addEventListener("focus", () => {
     state.softTarget = "terminal";
@@ -3092,6 +3238,7 @@ function bindEvents() {
   $("editor").addEventListener("focus", () => { state.softTarget = "editor"; });
   termInput.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
+    if (terminalClipboardShortcut(event)) return;
     // Printable keys are delivered through the input event, which is the only
     // path that works with soft keyboards and IMEs that report "Unidentified".
     if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {

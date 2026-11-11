@@ -839,7 +839,10 @@ body.term-resizing { user-select: none; cursor: row-resize; }
   white-space: pre;
   outline: none;
   cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
+.term ::selection { background: var(--selection); }
 .term-lines { white-space: pre; }
 .term:focus, .term.kb-focus { box-shadow: inset 0 0 0 1px var(--accent); }
 /* The PTY cursor.  A filled block in the theme's foreground keeps the glyph
