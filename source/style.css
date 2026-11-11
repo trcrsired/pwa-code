@@ -199,6 +199,9 @@ body.softkb #app { padding-bottom: calc(94px + var(--kb-cover, 0px)); }
   align-items: center;
   gap: 5px;
   flex: 0 0 auto;
+  /* The burger and the path stay on the left; every action button hugs the
+   * right edge even when the path is capped at its max width. */
+  margin-left: auto;
 }
 .tool-btn { white-space: nowrap; }
 .tool-btn.primary { border-color: var(--accent); color: var(--accent); }
