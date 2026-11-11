@@ -981,6 +981,28 @@ body.term-max #termWrap {
   min-height: 0;
   background: var(--bg);
 }
+/* Full screen means the shell, not the terminal's own chrome: the session
+ * tabs, status text and every toolbar action except the restore button go
+ * away.  The button floats in a slim strip so no terminal rows are lost. */
+body.term-max #termTabs { display: none; }
+body.term-max #termWrap .panel-toolbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  padding: 2px 4px;
+  border-bottom: 0;
+  background: transparent;
+  flex-wrap: nowrap;
+}
+body.term-max #termWrap .panel-toolbar > :not(#termMax) { display: none; }
+body.term-max #termMax {
+  background: var(--panel-2);
+  border-color: var(--border-strong);
+  opacity: 0.85;
+}
+body.term-max #termMax:hover { opacity: 1; }
+body.term-max .term-stack { padding-top: 26px; }
 #termMax[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .term-handle {
   flex: 0 0 9px;

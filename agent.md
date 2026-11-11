@@ -100,8 +100,10 @@ filesystem header is opt-in and is not linked into it.
   OS keyboard rather than behind it.
 - The terminal toolbar's ⛶ button toggles a full-screen pane: `body.term-max`
   hides the top bar, document tabs, status bar and sidebar and pins
-  `#termWrap` to the viewport.  The button becomes ⤡ to restore, focus returns
-  to the shell, and hiding/closing the pane clears the state.
+  `#termWrap` to the viewport.  The terminal's own session tabs, status text
+  and every toolbar action except the floating ⤡ restore button are hidden
+  too, so only shell rows remain.  Focus returns to the shell, and
+  hiding/closing the pane clears the state.
 
 ## 3. Layout
 
