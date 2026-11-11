@@ -72,7 +72,7 @@ self.addEventListener("message", (event) => {
 });
 
 function offline() {
-  return new Response("pwa code is offline", {
+  return new Response("PWA Code is offline", {
     status: 503,
     headers: { "Content-Type": "text/plain; charset=utf-8" },
   });

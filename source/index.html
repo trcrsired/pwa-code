@@ -16,23 +16,20 @@
   } catch (e) { /* private mode or malformed settings */ }
 </script>
 <meta name="theme-color" content="#000000">
-<meta name="description" content="pwa code - a portable fast_io powered code editor">
+<meta name="description" content="PWA Code - a portable fast_io powered code editor">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
-<title>pwa code</title>
+<title>PWA Code</title>
 </head>
 <body data-theme="dark">
 <div id="app">
   <header id="topbar">
     <button id="menuBtn" class="icon-btn" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
-    <input id="topPath" class="top-path" type="text" value="/" spellcheck="false"
-      autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Path"
-      title="Path — Enter to go, Esc to cancel. Prefix with internal:, external: or remote: to switch volumes." />
-    <div class="doc-head">
-      <span id="docName">untitled</span>
-      <span id="dirtyDot" class="dirty-dot" hidden></span>
-    </div>
+    <input id="topPath" class="top-path" type="text" value="" placeholder="untitled" spellcheck="false"
+      autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Current file path"
+      title="Current file path — Enter to open another file, Esc to cancel" />
+    <span id="dirtyDot" class="dirty-dot" hidden></span>
     <div class="top-actions">
       <button id="undoBtn" class="tool-btn hist-btn" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>↶</button>
       <button id="redoBtn" class="tool-btn hist-btn" title="Redo (Ctrl+Shift+Z)" aria-label="Redo" disabled>↷</button>
@@ -143,6 +140,7 @@
         <span id="findCount" class="find-count"></span>
         <label class="find-case"><input id="findCase" type="checkbox"> Aa</label>
         <label class="find-case"><input id="findWord" type="checkbox"> Word</label>
+        <label class="find-case" title="Search every file in the current volume"><input id="findFiles" type="checkbox"> Files</label>
         <button id="findClose" class="mini-btn" title="Close (Esc)">×</button>
       </div>
     </main>
@@ -170,6 +168,14 @@
     <button id="conflictClose" class="mini-btn" title="Close">×</button>
   </div>
   <div id="conflictList" class="conflict-list"></div>
+</div>
+
+<div id="fileFindPanel" class="conflict-panel file-find-panel" role="region" aria-label="Find in files results" hidden>
+  <div class="conflict-head">
+    <span id="fileFindTitle">Find in files</span>
+    <button id="fileFindClose" class="mini-btn" title="Close">×</button>
+  </div>
+  <div id="fileFindList" class="file-find-list"></div>
 </div>
 
 <div id="softKeyboard" class="soft-keyboard" hidden>

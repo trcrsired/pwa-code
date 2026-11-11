@@ -11,6 +11,8 @@ import { Terminal, keyToBytes } from "./terminal.js";
 
 const $ = (id) => document.getElementById(id);
 const NO_MATCH = 0xFFFFFFFF;
+let fileSearchTimer = 0;
+let fileSearchEnginePromise = null;
 
 const DEFAULT_SETTINGS = {
   theme: "dark",
@@ -90,6 +92,13 @@ const state = {
   conflictTimer: 0,
   activeConflict: -1,
   conflictCount: 0,
+  fileMatches: [],
+  fileMatchIndex: -1,
+  fileSearchToken: 0,
+  fileSearchRoot: "",
+  fileSearchQuery: "",
+  fileSearchRunning: false,
+  fileSearchPromise: null,
   docIndent: 0,
 };
 
@@ -479,16 +488,19 @@ function tabLabel(tab) {
   return "untitled";
 }
 
-function updateDocName() {
+function updateDocPath() {
+  const input = $("topPath");
+  if (!input) return;
   const large = state.largeMode;
   const tab = activeTab();
-  $("docName").textContent = state.path
-    ? `${state.path}${large ? " (view)" : ""}`
-    : large
-      ? "untitled (view)"
-      : tab && tab.label
-        ? tab.label
-        : "untitled";
+  const fallback = tab && tab.label ? tab.label : "untitled";
+  // The top box is the current document path, not a directory browser.  It
+  // stays empty (showing "untitled") until a file is selected.
+  input.value = state.path || "";
+  input.placeholder = large ? `${fallback} (view)` : fallback;
+  input.title = state.path
+    ? `Current file: ${state.path}${large ? " (read-only view)" : ""} — Enter to open another file, Esc to cancel`
+    : "No file open — type a path and press Enter";
 }
 
 function renderTabs() {
@@ -609,7 +621,7 @@ function adoptLoadedDocument(tab, info, options) {
   tab.historyIndex = state.historyIndex;
   tab.historyTime = state.historyTime;
   updateDirty(tab.dirty);
-  updateDocName();
+  updateDocPath();
   renderTabs();
   updateHistoryButtons();
   updateStatus();
@@ -664,7 +676,7 @@ async function applyTabData(tab) {
     renderWindow();
     updateHistoryButtons();
   }
-  updateDocName();
+  updateDocPath();
   updateStatus();
   renderTabs();
   if (!$("findBar").hidden) refreshFindCount();
@@ -723,7 +735,7 @@ async function newBlankTab() {
   tab.historyIndex = state.historyIndex;
   tab.historyTime = state.historyTime;
   updateDirty(false);
-  updateDocName();
+  updateDocPath();
   renderTabs();
   $("editor").focus();
   scheduleSessionSave();
@@ -760,7 +772,7 @@ async function closeTab(index, force = false) {
     fresh.historyIndex = state.historyIndex;
     fresh.historyTime = state.historyTime;
     updateDirty(false);
-    updateDocName();
+    updateDocPath();
     renderTabs();
     updateStatus();
     scheduleSessionSave();
@@ -828,7 +840,7 @@ function updateStatus() {
     $("statusEncoding").textContent = ENCODINGS[state.engine.encoding] || "UTF-8";
   }
   $("statusWasm").textContent = state.engineReady ? "wasm" : "engine…";
-  updateDocName();
+  updateDocPath();
   updateGutterCursor(line);
 }
 
@@ -1616,9 +1628,7 @@ function setVolTab(kind) {
 // active mount, and typing a path plus Enter navigates there (or opens the file
 // when the last segment is one).
 function setPathDisplay() {
-  const value = `/${state.volumes.path}`;
-  if ($("pathBar")) $("pathBar").value = value;
-  if ($("topPath")) $("topPath").value = value;
+  if ($("pathBar")) $("pathBar").value = `/${state.volumes.path}`;
 }
 
 function normalizeVolumePath(text) {
@@ -1658,26 +1668,38 @@ async function goToTypedPath(text) {
   }
 }
 
-// The top path box also accepts "internal:/dir", "external:/dir" or
-// "remote:/dir" so a path can switch volumes without opening the sidebar.
-async function goToTypedPathOrVolume(text) {
-  const raw = String(text ?? "").trim();
-  const match = /^(internal|external|remote):(.*)$/i.exec(raw);
-  if (!match) {
-    await goToTypedPath(raw);
+// The top box is the document path.  Entering a file path opens it in the
+// current volume; entering a folder only moves the explorer there and leaves
+// the document path untouched (the path changes only when a file is selected).
+async function openTypedDocument(text) {
+  const target = normalizeVolumePath(text);
+  if (!target || target === state.path) {
+    updateDocPath();
     return;
   }
-  const kind = match[1].toLowerCase();
-  const rest = match[2];
-  if (kind !== state.volumes.current) {
-    setVolTab(kind);
-    await refreshFiles();
-  }
-  if (normalizeVolumePath(rest) === "" && state.volumes.path === "") {
-    setPathDisplay();
+  const ref = state.path ? state.volume : state.volumes.ref();
+  let volume;
+  try {
+    volume = state.volumes.get(ref);
+  } catch (error) {
+    fail("open", error);
+    updateDocPath();
     return;
   }
-  await goToTypedPath(rest);
+  try {
+    const info = await volume.stat(target);
+    if (info && info.dir) {
+      state.volumes.path = target;
+      await refreshFiles();
+      toast(`${target}/ is a folder — opened in the explorer`);
+      updateDocPath();
+      return;
+    }
+  } catch {
+    // Not a directory or file the volume can stat; let openPath report it.
+  }
+  await openPath(target, false, ref);
+  updateDocPath();
 }
 
 function renderMountBar() {
@@ -1830,10 +1852,12 @@ async function openPath(path, quiet = false, volumeRef = null) {
       $("conflictPanel").hidden = false;
       renderConflictList();
     }
-    toast(
-      `${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}` +
-        (tab.large ? " • large file: read-only partial view" : ""),
-    );
+    if (!quiet) {
+      toast(
+        `${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}` +
+          (tab.large ? " • large file: read-only partial view" : ""),
+      );
+    }
     renderWindow();
     // A full-screen terminal would cover the file that was just chosen.
     if (window.innerWidth <= 720 && terminalVisible()) collapseTerminalPane();
@@ -2076,7 +2100,7 @@ async function pasteEntry(entry) {
           tab.volume = destRef;
           tab.langPath = state.path;
         }
-        updateDocName();
+        updateDocPath();
         renderTabs();
         scheduleBackupSave();
       }
@@ -2143,7 +2167,7 @@ async function renameEntry(entry) {
       }
       tab.langPath = tab.path;
     }
-    updateDocName();
+    updateDocPath();
     renderTabs();
     scheduleBackupSave();
     if (state.clipboard?.volume === state.volumes.ref()) {
@@ -2289,7 +2313,7 @@ async function saveDocument(saveAs = false) {
       tab.eol = state.settings.eol;
     }
     updateDirty(false);
-    updateDocName();
+    updateDocPath();
     renderTabs();
     scheduleBackupSave();
     toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
@@ -3177,13 +3201,86 @@ function effectiveIndent() {
   return state.settings.indent === -1 ? state.docIndent : state.settings.indent;
 }
 
+// The line span touched by a selection.  A selection ending exactly at a line
+// start does not include that next line, so selecting a whole line plus its
+// newline indents only that line.
+function editorLineRange(text, start, end) {
+  const first = text.lastIndexOf("\n", start - 1) + 1;
+  let last;
+  if (end > start && text[end - 1] === "\n") {
+    last = text.lastIndexOf("\n", end - 2) + 1;
+  } else {
+    last = text.lastIndexOf("\n", end - 1) + 1;
+  }
+  const nl = text.indexOf("\n", last);
+  const lastEnd = nl < 0 ? text.length : nl;
+  return { first, last, lastEnd };
+}
+
+// Tab/Shift+Tab.  A caret inserts (or outdents the current line); a selection
+// indents or outdents every line it touches and keeps the same logical text
+// selected so repeated presses stack.
+function changeEditorIndent(outdent) {
+  const editor = $("editor");
+  const text = editor.value;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const unit = effectiveIndent() === 1 ? "\t" : "  ";
+  if (start === end && !outdent) {
+    insertAtCursor(unit);
+    return;
+  }
+  const { first, last, lastEnd } = editorLineRange(text, start, end);
+  const lines = text.slice(first, lastEnd).split("\n");
+  let firstDelta = 0;
+  let totalDelta = 0;
+  let changed = false;
+  const outLines = lines.map((line, index) => {
+    let delta = 0;
+    let next = line;
+    if (outdent) {
+      if (line.startsWith("\t")) {
+        next = line.slice(1);
+        delta = -1;
+      } else {
+        let spaces = 0;
+        while (spaces < line.length && spaces < unit.length && line[spaces] === " ") spaces++;
+        if (spaces > 0) {
+          next = line.slice(spaces);
+          delta = -spaces;
+        }
+      }
+    } else {
+      next = unit + line;
+      delta = unit.length;
+    }
+    if (delta !== 0) changed = true;
+    if (index === 0) firstDelta = delta;
+    totalDelta += delta;
+    return next;
+  });
+  if (!changed) return;
+  let newStart;
+  let newEnd;
+  if (start === end) {
+    newStart = newEnd = Math.max(first, start + firstDelta);
+  } else {
+    // Keep the indent outside the selection when it began at the line start.
+    newStart = Math.max(first, start + (start > first ? firstDelta : 0));
+    newEnd = Math.max(newStart, end + totalDelta);
+  }
+  editor.setRangeText(outLines.join("\n"), first, lastEnd, "preserve");
+  editor.setSelectionRange(newStart, newEnd, editor.selectionDirection);
+  editor.dispatchEvent(new Event("input"));
+}
+
 // The extra key row belongs to whichever surface currently has the caret.
 // Merely having the terminal open must not steal Esc/Tab/arrows from an editor
 // the user is typing in.
 function softKeyboardTargetsTerminal() {
   if (!terminalVisible()) return false;
   const active = document.activeElement;
-  if (active === $("editor") || active === $("pathBar")) return false;
+  if (active === $("editor") || active === $("pathBar") || active === $("topPath")) return false;
   if (active === $("termInput") || $("termStack").contains(active)) {
     return true;
   }
@@ -3195,7 +3292,7 @@ function editorKeyCommand(key, mods) {
   if (document.activeElement !== editor && mods.ctrl) editor.focus();
   switch (key) {
     case "Tab":
-      insertAtCursor(effectiveIndent() === 1 ? "\t" : "  ");
+      changeEditorIndent(false);
       return true;
     case "Enter":
       insertNewline();
@@ -3354,9 +3451,13 @@ function deleteForward() {
 /* ------------------------------------------------------------- find/replace */
 
 function openFind(replace) {
-  // On a phone the terminal is a full-screen overlay; searching the document
-  // behind it would show a find bar the user cannot see.
-  if (terminalVisible() && window.innerWidth <= 720) hideTerminalPane();
+  // On a phone the terminal and the explorer are full-screen overlays;
+  // searching the document behind them would show a find bar the user cannot
+  // see.
+  if (window.innerWidth <= 720) {
+    if (terminalVisible()) hideTerminalPane();
+    $("sidebar").classList.add("hidden");
+  }
   const bar = $("findBar");
   bar.hidden = false;
   const editor = $("editor");
@@ -3366,11 +3467,13 @@ function openFind(replace) {
   $("findText").select();
   if (replace) $("replaceText").focus();
   refreshFindCount();
+  if (fileSearchEnabled() && $("findText").value) scheduleFileSearch();
 }
 
 function closeFind() {
   $("findBar").hidden = true;
   $("findCount").textContent = "";
+  closeFileFind();
   $("editor").focus();
 }
 
@@ -3400,9 +3503,301 @@ function findMatches(text, needle) {
   return matches;
 }
 
+/* ------------------------------------------------------ find in files */
+
+function fileSearchEnabled() {
+  return !!$("findFiles")?.checked && !$("findBar").hidden;
+}
+
+function getFileSearchEngine() {
+  if (!fileSearchEnginePromise) {
+    fileSearchEnginePromise = (async () => {
+      const engine = new Engine();
+      await engine.init("pwacode.wasm");
+      return engine;
+    })().catch((error) => {
+      fileSearchEnginePromise = null;
+      throw error;
+    });
+  }
+  return fileSearchEnginePromise;
+}
+
+// Text files can still contain a NUL byte; only treat a file as binary when
+// NULs are common.  UTF-16/32 BOMs and alternating NUL patterns stay text.
+function looksBinary(bytes) {
+  if (!bytes || !bytes.length) return false;
+  if (bytes.length >= 4) {
+    if (bytes[0] === 0xFF && bytes[1] === 0xFE && bytes[2] === 0 && bytes[3] === 0) return false;
+    if (bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 0xFE && bytes[3] === 0xFF) return false;
+  }
+  if (bytes.length >= 2) {
+    if ((bytes[0] === 0xFF && bytes[1] === 0xFE) ||
+        (bytes[0] === 0xFE && bytes[1] === 0xFF)) return false;
+  }
+  const n = Math.min(bytes.length, 4096);
+  let nul = 0;
+  let even = 0;
+  let odd = 0;
+  for (let i = 0; i < n; i++) {
+    if (bytes[i] !== 0) continue;
+    nul++;
+    if (i % 2 === 0) even++;
+    else odd++;
+  }
+  if (!nul) return false;
+  // UTF-16 without a BOM: one parity is mostly NUL while the other is text.
+  const evenHigh = even > n / 4;
+  const oddHigh = odd > n / 4;
+  if (evenHigh && odd <= n / 20) return false;
+  if (oddHigh && even <= n / 20) return false;
+  return true;
+}
+
+async function collectFiles(volume, dir, out, limit) {
+  if (out.length >= limit) return;
+  let entries;
+  try {
+    entries = await volume.list(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (out.length >= limit) return;
+    if (entry.dir && (entry.name === ".git" || entry.name === ".hg" || entry.name === ".svn")) {
+      continue;
+    }
+    const path = dir ? `${dir}/${entry.name}` : entry.name;
+    if (entry.dir) await collectFiles(volume, path, out, limit);
+    else out.push(path);
+  }
+}
+
+function findFileMatches(text, needle, caseSensitive, wholeWord, limit) {
+  if (!needle || limit <= 0) return [];
+  const haystack = caseSensitive ? text : text.toLowerCase();
+  const target = caseSensitive ? needle : needle.toLowerCase();
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  }
+  const out = [];
+  let from = 0;
+  while (out.length < limit) {
+    const at = haystack.indexOf(target, from);
+    if (at < 0) break;
+    if (wholeWord && (isWordChar(text[at - 1]) || isWordChar(text[at + needle.length]))) {
+      from = at + 1;
+      continue;
+    }
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= at) lo = mid;
+      else hi = mid - 1;
+    }
+    const lineStart = starts[lo];
+    const nl = text.indexOf("\n", at);
+    const lineEnd = nl < 0 ? text.length : nl;
+    let preview = text.slice(lineStart, lineEnd).replace(/\t/g, " ");
+    if (preview.length > 160) preview = `${preview.slice(0, 160)}…`;
+    out.push({
+      line: lo + 1,
+      column: at - lineStart + 1,
+      preview: preview.trim() || " ",
+    });
+    from = at + Math.max(1, target.length);
+  }
+  return out;
+}
+
+function scheduleFileSearch() {
+  if (!fileSearchEnabled()) return;
+  if (fileSearchTimer) clearTimeout(fileSearchTimer);
+  fileSearchTimer = setTimeout(() => {
+    fileSearchTimer = 0;
+    runFileSearch();
+  }, 320);
+}
+
+function closeFileFind() {
+  if (fileSearchTimer) {
+    clearTimeout(fileSearchTimer);
+    fileSearchTimer = 0;
+  }
+  state.fileSearchToken++;
+  state.fileSearchQuery = "";
+  state.fileMatches = [];
+  state.fileMatchIndex = -1;
+  const panel = $("fileFindPanel");
+  if (panel) panel.hidden = true;
+}
+
+function runFileSearch() {
+  const promise = doFileSearch();
+  const safe = promise.catch((error) => {
+    console.error("find in files", error);
+  });
+  state.fileSearchPromise = safe;
+  state.fileSearchRunning = true;
+  safe.finally(() => {
+    if (state.fileSearchPromise === safe) {
+      state.fileSearchPromise = null;
+      state.fileSearchRunning = false;
+    }
+  });
+  return safe;
+}
+
+async function doFileSearch() {
+  const panel = $("fileFindPanel");
+  const list = $("fileFindList");
+  if (!panel || !list) return;
+  const needle = $("findText").value;
+  const token = ++state.fileSearchToken;
+  state.fileSearchQuery = needle;
+  state.fileMatches = [];
+  state.fileMatchIndex = -1;
+  if (!needle) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  list.textContent = "";
+  const note = document.createElement("div");
+  note.className = "file-find-empty";
+  note.textContent = "Searching…";
+  list.appendChild(note);
+  let volume;
+  const ref = state.volume || state.volumes.ref();
+  try {
+    volume = state.volumes.get(ref);
+  } catch (error) {
+    note.textContent = error.message;
+    return;
+  }
+  // Search the whole mounted volume, not just the folder the explorer happens
+  // to be showing: "find in files" is a project-wide search.
+  const root = "";
+  state.fileSearchRoot = root;
+  $("fileFindTitle").textContent = `Find in files — ${volume.label}`;
+  const files = [];
+  await collectFiles(volume, root, files, 4000);
+  let engine = null;
+  try {
+    engine = await getFileSearchEngine();
+  } catch {
+    engine = null;
+  }
+  const caseSensitive = $("findCase").checked;
+  const wholeWord = $("findWord").checked;
+  const MAX_MATCHES = 500;
+  const MAX_BYTES = 4 * 1024 * 1024;
+  const matches = [];
+  for (let i = 0; i < files.length && matches.length < MAX_MATCHES; i++) {
+    if (token !== state.fileSearchToken) return;
+    const path = files[i];
+    let bytes;
+    try {
+      bytes = await volume.read(path);
+    } catch {
+      continue;
+    }
+    if (!bytes || !bytes.length || bytes.length > MAX_BYTES || looksBinary(bytes)) continue;
+    let text;
+    if (engine) {
+      try {
+        engine.load(bytes, path, -1);
+        text = engine.text;
+      } catch {
+        continue;
+      }
+    } else {
+      text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    }
+    // The open file may have unsaved edits; search what the user sees.
+    if (path === state.path && !state.largeMode && !state.hexMode) {
+      text = $("editor").value;
+    }
+    const found = findFileMatches(
+      text, needle, caseSensitive, wholeWord, MAX_MATCHES - matches.length,
+    );
+    for (const hit of found) matches.push({ path, volume: ref, ...hit });
+    if ((i & 15) === 15) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  if (token !== state.fileSearchToken) return;
+  state.fileMatches = matches;
+  state.fileMatchIndex = -1;
+  renderFileFindResults();
+}
+
+function renderFileFindResults() {
+  const list = $("fileFindList");
+  if (!list) return;
+  list.textContent = "";
+  const title = $("fileFindTitle");
+  if (!state.fileMatches.length) {
+    const empty = document.createElement("div");
+    empty.className = "file-find-empty";
+    empty.textContent = $("findText").value
+      ? "No matches in this folder."
+      : "Type a query to search every file.";
+    list.appendChild(empty);
+    if (title) title.textContent = "Find in files";
+    return;
+  }
+  if (title) {
+    title.textContent = `Find in files — ${state.fileMatches.length}` +
+      `${state.fileMatches.length >= 500 ? "+" : ""} match` +
+      `${state.fileMatches.length === 1 ? "" : "es"}`;
+  }
+  state.fileMatches.forEach((match, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `file-find-item${index === state.fileMatchIndex ? " active" : ""}`;
+    const head = document.createElement("span");
+    head.className = "file-find-path";
+    head.textContent = match.path;
+    const loc = document.createElement("span");
+    loc.className = "file-find-line";
+    loc.textContent = `${match.line}:${match.column}`;
+    const preview = document.createElement("span");
+    preview.className = "file-find-preview";
+    preview.textContent = match.preview;
+    row.append(head, loc, preview);
+    row.addEventListener("click", () => openFileMatch(index));
+    list.appendChild(row);
+  });
+}
+
+async function openFileMatch(index) {
+  const match = state.fileMatches[index];
+  if (!match) return;
+  state.fileMatchIndex = index;
+  renderFileFindResults();
+  await openPath(match.path, true, match.volume);
+  jumpToLine(match.line, match.column);
+}
+
+function stepFileMatch(delta) {
+  if (!state.fileMatches.length) return;
+  let index = state.fileMatchIndex;
+  if (index < 0) {
+    index = delta > 0 ? 0 : state.fileMatches.length - 1;
+  } else {
+    index = (index + delta + state.fileMatches.length) % state.fileMatches.length;
+  }
+  openFileMatch(index);
+}
+
 function refreshFindCount() {
   const count = $("findCount");
   if (!count) return;
+  if (fileSearchEnabled()) {
+    count.textContent = $("findText").value ? "files" : "";
+    return;
+  }
   if (state.largeMode) {
     count.textContent = "view";
     return;
@@ -3419,6 +3814,24 @@ function refreshFindCount() {
 }
 
 function findNext(direction = 1) {
+  if (fileSearchEnabled()) {
+    const needle = $("findText").value;
+    if (!needle) return;
+    if (state.fileSearchQuery !== needle) {
+      runFileSearch().then(() => {
+        if (state.fileMatches.length) stepFileMatch(direction);
+      });
+    } else if (state.fileSearchRunning) {
+      state.fileSearchPromise?.then(() => {
+        if (state.fileMatches.length) stepFileMatch(direction);
+      });
+    } else if (state.fileMatches.length) {
+      stepFileMatch(direction);
+    } else {
+      toast("not found");
+    }
+    return;
+  }
   if (state.largeMode) {
     toast("Find is unavailable in the large-file view.", true);
     return;
@@ -3475,6 +3888,10 @@ function revealSelection() {
 }
 
 function replaceOne() {
+  if (fileSearchEnabled()) {
+    toast("Uncheck Files to replace in the open file.", true);
+    return;
+  }
   if (state.largeMode) return;
   const editor = $("editor");
   const needle = $("findText").value;
@@ -3491,6 +3908,10 @@ function replaceOne() {
 }
 
 function replaceAll() {
+  if (fileSearchEnabled()) {
+    toast("Uncheck Files to replace in the open file.", true);
+    return;
+  }
   if (state.largeMode) {
     toast("Replace is unavailable in the large-file view.", true);
     return;
@@ -4074,7 +4495,7 @@ async function seedInternal() {
   try {
     const entries = await state.volumes.internal.list("");
     if (entries.length) return;
-    const sample = `// pwa code — fast_io + WebAssembly edition
+    const sample = `// PWA Code — fast_io + WebAssembly edition
 // Open the native server for the terminal (WebSocket PTY) and remote volume.
 
 #include <fast_io.h>
@@ -4103,7 +4524,7 @@ int main() {
     await state.volumes.internal.write(
       "notes.md",
       new TextEncoder().encode(
-        "# pwa code\n\n" +
+        "# PWA Code\n\n" +
           "- Dark theme is full black; light theme is full white.\n" +
           "- Internal, external and remote volumes.\n" +
           "- Notepad++ keyword tables and depth-coloured brackets.\n" +
@@ -4188,19 +4609,7 @@ function bindEvents() {
     }
     if (event.key === "Tab") {
       event.preventDefault();
-      if (event.shiftKey) {
-        const value = editor.value;
-        const start = editor.selectionStart;
-        const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-        if (value.startsWith("  ", lineStart)) {
-          editor.setRangeText("", lineStart, lineStart + 2, "preserve");
-        } else if (value[lineStart] === "\t") {
-          editor.setRangeText("", lineStart, lineStart + 1, "preserve");
-        }
-        editor.dispatchEvent(new Event("input"));
-      } else {
-        insertAtCursor(effectiveIndent() === 1 ? "\t" : "  ");
-      }
+      changeEditorIndent(event.shiftKey);
       return;
     }
     if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
@@ -4252,9 +4661,27 @@ function bindEvents() {
   $("replaceOne").addEventListener("click", replaceOne);
   $("replaceAll").addEventListener("click", replaceAll);
   $("findClose").addEventListener("click", closeFind);
-  $("findText").addEventListener("input", refreshFindCount);
-  $("findCase").addEventListener("change", refreshFindCount);
-  $("findWord").addEventListener("change", refreshFindCount);
+  $("findText").addEventListener("input", () => {
+    refreshFindCount();
+    if (fileSearchEnabled()) scheduleFileSearch();
+  });
+  $("findCase").addEventListener("change", () => {
+    refreshFindCount();
+    if (fileSearchEnabled()) scheduleFileSearch();
+  });
+  $("findWord").addEventListener("change", () => {
+    refreshFindCount();
+    if (fileSearchEnabled()) scheduleFileSearch();
+  });
+  $("findFiles").addEventListener("change", () => {
+    refreshFindCount();
+    if (fileSearchEnabled()) {
+      if ($("findText").value) runFileSearch();
+    } else {
+      closeFileFind();
+    }
+  });
+  $("fileFindClose").addEventListener("click", closeFileFind);
 
   $("menuBtn").addEventListener("click", () => $("sidebar").classList.toggle("hidden"));
 
@@ -4706,22 +5133,22 @@ function bindEvents() {
   });
   $("pathBar").addEventListener("blur", setPathDisplay);
 
-  // The top path is the same address box, kept in sync with the sidebar one.
-  // Focusing selects the whole path so typing a new one replaces it.
+  // The top box shows the open file.  Focusing selects it so typing a new
+  // path replaces it; Enter opens that file, Escape restores the current one.
   $("topPath").addEventListener("focus", () => $("topPath").select());
   $("topPath").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       const typed = $("topPath").value;
       $("topPath").blur();
-      goToTypedPathOrVolume(typed);
+      openTypedDocument(typed);
     } else if (event.key === "Escape") {
       event.preventDefault();
-      setPathDisplay();
+      updateDocPath();
       $("topPath").blur();
     }
   });
-  $("topPath").addEventListener("blur", setPathDisplay);
+  $("topPath").addEventListener("blur", updateDocPath);
 
   $("newFileBtn").addEventListener("click", newFile);
   $("newDirBtn").addEventListener("click", newFolder);
