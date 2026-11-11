@@ -138,6 +138,14 @@ function readSettings() {
     if (raw) {
       const saved = JSON.parse(raw);
       state.settings = { ...DEFAULT_SETTINGS, ...saved };
+      // Settings can outlive a build with a smaller zoom range; keep the
+      // loaded values inside what the current UI can render.
+      state.settings.fontSize = Math.max(9, Math.min(72,
+        Number(state.settings.fontSize) || DEFAULT_SETTINGS.fontSize));
+      state.settings.lineHeight = Math.max(state.settings.fontSize + 2, Math.min(160,
+        Number(state.settings.lineHeight) || DEFAULT_SETTINGS.lineHeight));
+      state.settings.termFontSize = Math.max(8, Math.min(72,
+        Number(state.settings.termFontSize) || DEFAULT_SETTINGS.termFontSize));
       // Older builds always stored an explicit 0 (two spaces).  Unless the
       // user has touched the indent choice since, default that file to Auto.
       if (!saved.indentExplicit) state.settings.indent = -1;
@@ -191,12 +199,19 @@ function applySettings() {
 /* ------------------------------------------------------------------ zoom */
 
 const EDITOR_FONT_MIN = 9;
-const EDITOR_FONT_MAX = 32;
+const EDITOR_FONT_MAX = 72;
+const EDITOR_LINE_MAX = 160;
 const TERM_FONT_MIN = 8;
-const TERM_FONT_MAX = 32;
+const TERM_FONT_MAX = 72;
 
 function clampZoom(value, min, max) {
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+// One step is 1px at the default size and grows with the text, so reaching a
+// phone-sized 60-70px font does not need dozens of wheel notches or pinches.
+function zoomStep(size) {
+  return Math.max(1, Math.round(size * 0.1));
 }
 
 // Ctrl/Cmd + wheel or +/- zoom whichever surface owns the caret.  The editor
@@ -220,14 +235,19 @@ function repaintTerminals() {
 
 function zoomEditor(delta) {
   const s = state.settings;
-  const size = clampZoom(s.fontSize + delta, EDITOR_FONT_MIN, EDITOR_FONT_MAX);
+  const step = zoomStep(s.fontSize);
+  const size = clampZoom(
+    s.fontSize + (delta < 0 ? -step : step),
+    EDITOR_FONT_MIN,
+    EDITOR_FONT_MAX,
+  );
   if (size === s.fontSize) return;
   const editor = $("editor");
   const oldLineHeight = s.lineHeight;
   const topLine = oldLineHeight > 0 ? editor.scrollTop / oldLineHeight : 0;
   const spacing = s.lineHeight / Math.max(1, s.fontSize);
   s.fontSize = size;
-  s.lineHeight = Math.max(size + 2, Math.min(48, Math.round(size * spacing)));
+  s.lineHeight = Math.max(size + 2, Math.min(EDITOR_LINE_MAX, Math.round(size * spacing)));
   saveSettings();
   applySettings();
   if (topLine > 0) editor.scrollTop = topLine * s.lineHeight;
@@ -239,7 +259,12 @@ function zoomEditor(delta) {
 function zoomTerminal(delta) {
   const s = state.settings;
   const current = Number(s.termFontSize) || DEFAULT_SETTINGS.termFontSize;
-  const size = clampZoom(current + delta, TERM_FONT_MIN, TERM_FONT_MAX);
+  const step = zoomStep(current);
+  const size = clampZoom(
+    current + (delta < 0 ? -step : step),
+    TERM_FONT_MIN,
+    TERM_FONT_MAX,
+  );
   if (size === current) return;
   s.termFontSize = size;
   saveSettings();
@@ -273,6 +298,51 @@ function resetZoom(surface) {
 function zoomSurface(surface, delta) {
   if (surface === "terminal") zoomTerminal(delta);
   else zoomEditor(delta);
+}
+
+function pinchDistance(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+
+// The terminal's tap-to-focus handler must ignore the pointerups that trail a
+// two-finger pinch, otherwise the OS keyboard opens after every zoom.
+let pinchEndedAt = 0;
+function pinchRecently() {
+  return Date.now() - pinchEndedAt < 400;
+}
+
+// A two-finger pinch over the editor or terminal zooms that pane's font.  The
+// browser's own page pinch is disabled by the viewport meta, touch-action and
+// the cancelled Safari gesture events, so this is the only pinch behaviour.
+function bindPinchZoom(element, surface) {
+  let start = 0;
+  const stop = () => {
+    if (start) pinchEndedAt = Date.now();
+    start = 0;
+  };
+  element.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 2) {
+      stop();
+      return;
+    }
+    start = pinchDistance(event.touches);
+  }, { passive: true });
+  element.addEventListener("touchmove", (event) => {
+    if (event.touches.length !== 2 || !start) return;
+    event.preventDefault();
+    const distance = pinchDistance(event.touches);
+    if (distance > start * 1.18) {
+      zoomSurface(surface, 1);
+      start = distance;
+    } else if (distance < start * 0.85) {
+      zoomSurface(surface, -1);
+      start = distance;
+    }
+  }, { passive: false });
+  element.addEventListener("touchend", stop, { passive: true });
+  element.addEventListener("touchcancel", stop, { passive: true });
 }
 
 // Returns true when the event was a zoom shortcut.  The caller stops
@@ -3410,9 +3480,9 @@ function fillEncodingOptions() {
 async function applySettingsForm() {
   const s = state.settings;
   s.theme = $("setTheme").value;
-  s.fontSize = Math.max(9, Math.min(32, Number($("setFontSize").value) || 13));
-  s.lineHeight = Math.max(s.fontSize + 2, Math.min(48, Number($("setLineHeight").value) || 20));
-  s.termFontSize = Math.max(8, Math.min(32, Number($("setTermFontSize").value) || 13));
+  s.fontSize = Math.max(9, Math.min(72, Number($("setFontSize").value) || 13));
+  s.lineHeight = Math.max(s.fontSize + 2, Math.min(160, Number($("setLineHeight").value) || 20));
+  s.termFontSize = Math.max(8, Math.min(72, Number($("setTermFontSize").value) || 13));
   s.lineNumbers = $("setLineNumbers").checked;
   s.wrap = $("setWrap").checked;
   s.softKeyboard = $("setSoftKeyboard").checked;
@@ -3982,14 +4052,10 @@ function bindEvents() {
   });
   $("termCopy").addEventListener("click", copyTerminalSelection);
   $("termPaste").addEventListener("click", pasteTerminalClipboard);
-  $("termZoomOut").addEventListener("click", () => zoomTerminal(-1));
-  $("termZoomIn").addEventListener("click", () => zoomTerminal(1));
-  $("termZoomOut").addEventListener("dblclick", () => resetZoom("terminal"));
-  $("termZoomIn").addEventListener("dblclick", () => resetZoom("terminal"));
   // A real pointerdown on a button would move focus and collapse the terminal
   // selection before the click handler can read it.  Suppress the default so
-  // Copy still sees the text the user highlighted and zoom keeps the caret.
-  for (const id of ["termCopy", "termPaste", "termZoomOut", "termZoomIn"]) {
+  // Copy still sees the text the user highlighted.
+  for (const id of ["termCopy", "termPaste"]) {
     const button = $(id);
     button.addEventListener("pointerdown", (event) => event.preventDefault());
     button.addEventListener("mousedown", (event) => event.preventDefault());
@@ -4059,6 +4125,8 @@ function bindEvents() {
       if (pointer.inst.term.dirty) pointer.inst.term.schedule();
     }
     if (!pointer) return;
+    // A pinch is a zoom gesture, not a request for the OS keyboard.
+    if (pinchRecently()) return;
     // A drag is a selection gesture; leave focus (and the selection) alone.
     if (pointer.moved || terminalHasSelection(pointer.inst)) return;
     // A plain tap/click is the request for the OS keyboard.
@@ -4073,7 +4141,7 @@ function bindEvents() {
   termStack.addEventListener("click", () => {
     const inst = activeTermInst();
     ensureTerminalConnection(inst);
-    if (terminalHasSelection(inst)) return;
+    if (pinchRecently() || terminalHasSelection(inst)) return;
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
   });
   termStack.addEventListener("keydown", (event) => {
@@ -4355,22 +4423,23 @@ function bindEvents() {
 
   $("statusWrap").addEventListener("click", toggleWrap);
 
-  $("statusZoomOut").addEventListener("click", () => zoomEditor(-1));
-  $("statusZoomIn").addEventListener("click", () => zoomEditor(1));
-  $("statusZoomOut").addEventListener("dblclick", () => resetZoom("editor"));
-  $("statusZoomIn").addEventListener("dblclick", () => resetZoom("editor"));
+  // Ctrl/Cmd + wheel (and a trackpad pinch, which reports ctrlKey) is our UI
+  // zoom everywhere in the app.  The browser page itself never zooms; the
+  // event is cancelled even over the sidebar or toolbar, and the editor or
+  // terminal font changes instead.
+  document.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    zoomSurface(zoomSurfaceFor(event.target), event.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
 
-  // Ctrl/Cmd + wheel (and a trackpad pinch, which reports ctrlKey) zooms the
-  // pane under the pointer instead of the whole browser page.
-  const bindZoomWheel = (element, surface) => {
-    element.addEventListener("wheel", (event) => {
-      if (!event.ctrlKey && !event.metaKey) return;
-      event.preventDefault();
-      zoomSurface(surface, event.deltaY < 0 ? 1 : -1);
-    }, { passive: false });
-  };
-  bindZoomWheel($("editorWrap"), "editor");
-  bindZoomWheel($("termStack"), "terminal");
+  // Safari raises these for a pinch even when the viewport meta says
+  // user-scalable=no.  Cancel them so only our UI zoom runs.
+  for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+    document.addEventListener(type, (event) => event.preventDefault(), { passive: false });
+  }
+  bindPinchZoom($("editorWrap"), "editor");
+  bindPinchZoom($("termStack"), "terminal");
 
   // Capture phase: handle the shortcut before the editor/terminal keydown
   // handlers turn "=" or "-" into text or PTY bytes.

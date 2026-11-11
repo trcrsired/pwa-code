@@ -90,6 +90,10 @@ html, body {
    * strip beside the mobile drawer or resize the wrapped editor. */
   overflow: hidden;
   overscroll-behavior: none;
+  /* Double-tap and pinch belong to the app's own zoom controls, never to the
+   * browser page.  The viewport meta covers mobile; this covers desktop
+   * touchscreens and browsers that ignore user-scalable=no. */
+  touch-action: manipulation;
 }
 
 body {
@@ -99,6 +103,10 @@ body {
   font-size: 13px;
   -webkit-tap-highlight-color: transparent;
 }
+
+/* Pinch on these panes is the app's font zoom, not browser page zoom.  Panning
+ * and one-finger scrolling stay native. */
+#editorWrap, #termStack { touch-action: pan-x pan-y; }
 
 button, input, select, textarea {
   font-family: inherit;
