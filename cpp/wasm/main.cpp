@@ -374,12 +374,13 @@ extern "C"
 
 [[__gnu__::__visibility__("default")]] ::std::size_t pwa_view(::std::size_t first,
 														  ::std::size_t count,
-														  ::std::uint_least32_t line_numbers) noexcept
+														  ::std::uint_least32_t line_numbers,
+														  ::std::size_t match_offset) noexcept
 {
 	return abi_value(
 		[&]() throws -> ::std::size_t {
 			doc.render_view(first, count > max_view_lines ? max_view_lines : count,
-							line_numbers != 0, view_html);
+							line_numbers != 0, view_html, match_offset);
 			return view_html.size();
 		},
 		::std::size_t{});
@@ -388,6 +389,12 @@ extern "C"
 [[__gnu__::__visibility__("default")]] ::std::size_t pwa_bracket_match(::std::size_t offset) noexcept
 {
 	return doc.bracket_match(offset);
+}
+
+[[__gnu__::__visibility__("default")]] ::std::size_t
+pwa_bracket_match_utf16(::std::size_t offset) noexcept
+{
+	return doc.bracket_match_utf16(offset);
 }
 
 [[__gnu__::__visibility__("default")]] void pwa_indent(::std::size_t begin, ::std::size_t end,

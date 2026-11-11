@@ -254,14 +254,18 @@ export class Engine {
 
   // ---- view / editing -------------------------------------------------
 
-  view(firstLine, count, lineNumbers = true) {
-    this.exports.pwa_view(firstLine, count, lineNumbers ? 1 : 0);
+  view(firstLine, count, lineNumbers = true, matchOffset = 0xFFFFFFFF) {
+    this.exports.pwa_view(firstLine, count, lineNumbers ? 1 : 0, matchOffset);
     this._check();
     return this._viewText();
   }
 
   bracketMatch(offset) {
     return this.exports.pwa_bracket_match(offset);
+  }
+
+  bracketMatchUtf16(offset) {
+    return this.exports.pwa_bracket_match_utf16(offset);
   }
 
   indent(begin, end, mode, outdent) {

@@ -10,6 +10,7 @@ import { Volumes, ExternalVolume, baseName, parentPath } from "./storage.js";
 import { Terminal, keyToBytes } from "./terminal.js";
 
 const $ = (id) => document.getElementById(id);
+const NO_MATCH = 0xFFFFFFFF;
 
 const DEFAULT_SETTINGS = {
   theme: "dark",
@@ -76,6 +77,13 @@ const state = {
   tabSeq: 0,
   tabToken: 0,
   switchingTab: false,
+  backupReady: false,
+  backupWriting: false,
+  backupPending: false,
+  backupLastJson: "",
+  backupErrorShown: false,
+  bracketMatchSource: -1,
+  bracketMatchOffset: NO_MATCH,
   softTarget: "editor",
   conflicts: [],
   conflictLines: new Map(),
@@ -650,6 +658,7 @@ async function applyTabData(tab) {
     editor.scrollLeft = tab.scrollLeft;
     editor.setSelectionRange(tab.cursorStart, tab.cursorEnd);
     updateDirty(tab.dirty);
+    refreshBracketMatch(false);
     refreshConflicts();
     updateHighlight();
     renderWindow();
@@ -660,6 +669,7 @@ async function applyTabData(tab) {
   renderTabs();
   if (!$("findBar").hidden) refreshFindCount();
   scheduleSessionSave();
+  scheduleBackupSave();
 }
 
 async function switchTab(index, focus = true) {
@@ -717,6 +727,7 @@ async function newBlankTab() {
   renderTabs();
   $("editor").focus();
   scheduleSessionSave();
+  scheduleBackupSave();
 }
 
 async function closeTab(index, force = false) {
@@ -753,6 +764,7 @@ async function closeTab(index, force = false) {
     renderTabs();
     updateStatus();
     scheduleSessionSave();
+    scheduleBackupSave();
     return;
   }
   if (wasActive) {
@@ -764,6 +776,7 @@ async function closeTab(index, force = false) {
   }
   renderTabs();
   scheduleSessionSave();
+  scheduleBackupSave();
 }
 
 // A file or folder was deleted: drop every tab that pointed into it.
@@ -781,6 +794,7 @@ function updateDirty(dirty) {
   state.dirty = dirty;
   $("dirtyDot").hidden = !dirty;
   updateTabDirty();
+  if (dirty) scheduleBackupSave();
 }
 
 function updateStatus() {
@@ -823,6 +837,47 @@ function updateGutterCursor(line) {
   for (const el of $("gutter").querySelectorAll(".gl")) {
     el.classList.toggle("current", Number(el.dataset.line) === line - 1);
   }
+}
+
+// Highlight the bracket matching the one under the caret (or the single
+// bracket selected).  The engine returns a UTF-8 byte offset because that is
+// what the view renderer uses; the caret offset is UTF-16, so the conversion
+// happens inside the wasm bridge.
+function refreshBracketMatch(render = true) {
+  if (!state.engineReady || state.largeMode || state.hexMode) {
+    if (state.bracketMatchOffset !== NO_MATCH || state.bracketMatchSource !== -1) {
+      state.bracketMatchOffset = NO_MATCH;
+      state.bracketMatchSource = -1;
+      if (render) updateHighlight();
+    }
+    return;
+  }
+  const editor = $("editor");
+  const text = editor.value;
+  let source = -1;
+  if (editor.selectionStart !== editor.selectionEnd) {
+    const selected = text.slice(editor.selectionStart, editor.selectionEnd);
+    if (selected.length === 1 && "()[]{}".includes(selected)) {
+      source = editor.selectionStart;
+    }
+  } else {
+    const at = editor.selectionStart;
+    if ("()[]{}".includes(text[at] || "")) source = at;
+    else if ("()[]{}".includes(text[at - 1] || "")) source = at - 1;
+  }
+  let match = NO_MATCH;
+  if (source >= 0) {
+    try {
+      match = state.engine.bracketMatchUtf16(source);
+    } catch {
+      match = NO_MATCH;
+    }
+    if (match === NO_MATCH || match >= state.engine.size) match = NO_MATCH;
+  }
+  if (match === state.bracketMatchOffset && source === state.bracketMatchSource) return;
+  state.bracketMatchOffset = match;
+  state.bracketMatchSource = source;
+  if (render) updateHighlight();
 }
 
 /* ------------------------------------------------------- editor renderer */
@@ -1275,6 +1330,7 @@ function enterLargeMode(info) {
   state.activeConflict = -1;
   state.conflictCount = 0;
   updateConflictUI(false);
+  refreshBracketMatch(false);
 }
 
 function exitLargeMode() {
@@ -1321,7 +1377,7 @@ function renderLargeWindow() {
   const count = Math.max(1, Math.min(visible, total - first));
   let html;
   try {
-    html = state.engine.view(first, count, false);
+    html = state.engine.view(first, count, false, state.bracketMatchOffset);
   } catch (error) {
     fail("render", error);
     return;
@@ -1367,7 +1423,7 @@ function renderWindow() {
   }
   let html;
   try {
-    html = state.engine.view(first, count, false);
+    html = state.engine.view(first, count, false, state.bracketMatchOffset);
   } catch (error) {
     fail("render", error);
     return;
@@ -1453,6 +1509,7 @@ function setEditorText(text) {
     tab.historyIndex = state.historyIndex;
     tab.historyTime = state.historyTime;
   }
+  refreshBracketMatch(false);
   refreshConflicts();
   updateHighlight();
   updateStatus();
@@ -1997,6 +2054,7 @@ async function pasteEntry(entry) {
         }
         updateDocName();
         renderTabs();
+        scheduleBackupSave();
       }
       state.clipboard = null;
     }
@@ -2063,6 +2121,7 @@ async function renameEntry(entry) {
     }
     updateDocName();
     renderTabs();
+    scheduleBackupSave();
     if (state.clipboard?.volume === state.volumes.ref()) {
       const clip = state.clipboard;
       if (clip.path === oldPath) {
@@ -2208,6 +2267,7 @@ async function saveDocument(saveAs = false) {
     updateDirty(false);
     updateDocName();
     renderTabs();
+    scheduleBackupSave();
     toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
@@ -2295,6 +2355,7 @@ function closeHex() {
   $("hexWrap").hidden = true;
   $("editorWrap").hidden = false;
   state.wrapDirty = true;
+  refreshBracketMatch(false);
   renderWindow();
 }
 
@@ -3193,6 +3254,7 @@ function moveEditorLogical(key, extend) {
   } else {
     editor.setSelectionRange(target, target);
   }
+  refreshBracketMatch();
   revealSelection();
   updateStatus();
 }
@@ -3224,6 +3286,7 @@ function moveEditorSelection(key) {
   }
   if (next === pos) return false;
   editor.setSelectionRange(next, next);
+  refreshBracketMatch();
   revealSelection();
   updateStatus();
   return true;
@@ -3359,6 +3422,7 @@ function findNext(direction = 1) {
   const at = matches[index];
   editor.setSelectionRange(at, at + needle.length);
   editor.focus();
+  refreshBracketMatch();
   revealSelection();
   updateStatus();
   $("findCount").textContent = `${index + 1}/${matches.length}`;
@@ -3472,6 +3536,7 @@ function jumpToLine(wanted, column = 1) {
   offset = Math.min(offset + column - 1, end);
   editor.focus();
   editor.setSelectionRange(offset, offset);
+  refreshBracketMatch();
   revealSelection();
   updateStatus();
 }
@@ -3623,6 +3688,226 @@ function scheduleSessionSave() {
   sessionSaveTimer = setTimeout(saveSessionNow, 250);
 }
 
+/* ------------------------------------------------- unsaved-edit backup */
+
+// Dirty buffers are copied to a private OPFS directory outside the visible
+// "pwa-code" volume root.  They survive a reload/crash even when the tab is
+// untitled or the underlying mount is not available next time.
+const BACKUP_DIR = "pwa-code-private";
+const BACKUP_FILE = "unsaved.json";
+let backupSaveTimer = 0;
+let backupMaxTimer = 0;
+
+async function backupDirectory(create) {
+  if (!navigator.storage?.getDirectory) {
+    throw new Error("Origin Private File System is unavailable.");
+  }
+  const origin = await navigator.storage.getDirectory();
+  return origin.getDirectoryHandle(BACKUP_DIR, { create });
+}
+
+async function readUnsavedBackup() {
+  try {
+    const dir = await backupDirectory(false);
+    const handle = await dir.getFileHandle(BACKUP_FILE, { create: false });
+    const file = await handle.getFile();
+    const data = JSON.parse(await file.text());
+    return data && Array.isArray(data.tabs) ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeUnsavedBackup(json) {
+  const dir = await backupDirectory(true);
+  const handle = await dir.getFileHandle(BACKUP_FILE, { create: true });
+  const writable = await handle.createWritable();
+  try {
+    await writable.write(json);
+  } finally {
+    await writable.close();
+  }
+}
+
+async function deleteUnsavedBackup() {
+  try {
+    const dir = await backupDirectory(false);
+    await dir.removeEntry(BACKUP_FILE);
+  } catch {
+    /* no backup to remove */
+  }
+}
+
+function scheduleBackupSave() {
+  if (!state.backupReady) return;
+  // A continuous typist would otherwise keep resetting the debounce forever.
+  if (!backupMaxTimer) {
+    backupMaxTimer = setTimeout(() => {
+      backupMaxTimer = 0;
+      saveUnsavedBackupNow();
+    }, 5000);
+  }
+  if (backupSaveTimer) clearTimeout(backupSaveTimer);
+  backupSaveTimer = setTimeout(() => {
+    backupSaveTimer = 0;
+    saveUnsavedBackupNow();
+  }, 750);
+}
+
+function backupEntryFor(tab) {
+  return {
+    path: tab.path,
+    volume: tab.volume,
+    label: tab.label,
+    langPath: tab.langPath,
+    text: tab.text,
+    encoding: tab.encoding,
+    bom: !!tab.bom,
+    sourceCrlf: !!tab.sourceCrlf,
+    eol: tab.eol,
+    docIndent: tab.docIndent,
+    cursorStart: tab.cursorStart,
+    cursorEnd: tab.cursorEnd,
+    scrollTop: tab.scrollTop,
+    scrollLeft: tab.scrollLeft,
+  };
+}
+
+async function saveUnsavedBackupNow() {
+  if (!state.backupReady) return;
+  if (backupSaveTimer) {
+    clearTimeout(backupSaveTimer);
+    backupSaveTimer = 0;
+  }
+  if (backupMaxTimer) {
+    clearTimeout(backupMaxTimer);
+    backupMaxTimer = 0;
+  }
+  if (state.backupWriting) {
+    state.backupPending = true;
+    return;
+  }
+  state.backupWriting = true;
+  try {
+    captureActiveTab();
+    const entries = [];
+    let active = -1;
+    const current = activeTab();
+    for (const tab of state.tabs) {
+      if (!tab.dirty || tab.large) continue;
+      if (tab === current) active = entries.length;
+      entries.push(backupEntryFor(tab));
+    }
+    if (!entries.length) {
+      await deleteUnsavedBackup();
+      state.backupLastJson = "";
+      return;
+    }
+    const payload = { version: 1, active, tabs: entries };
+    const json = JSON.stringify(payload);
+    if (json === state.backupLastJson) return;
+    await writeUnsavedBackup(json);
+    state.backupLastJson = json;
+  } catch {
+    if (!state.backupErrorShown) {
+      state.backupErrorShown = true;
+      toast("Could not back up unsaved edits to private storage.", true);
+    }
+  } finally {
+    state.backupWriting = false;
+    if (state.backupPending) {
+      state.backupPending = false;
+      scheduleBackupSave();
+    }
+  }
+}
+
+// Populate a tab from a backup without touching the engine; the chosen active
+// tab is loaded afterwards by applyTabData.
+function fillTabFromBackup(tab, entry) {
+  const text = typeof entry.text === "string" ? entry.text : "";
+  let path = typeof entry.path === "string" ? entry.path : "";
+  const volume = entry.volume || state.volumes.ref();
+  let label = typeof entry.label === "string" ? entry.label : "";
+  const langPath = typeof entry.langPath === "string" ? entry.langPath : path;
+  if (path) {
+    try {
+      state.volumes.get(volume);
+    } catch {
+      // The mount is not available this session.  Keep the text as a
+      // recovered untitled buffer instead of losing the edits.
+      label = `${baseName(path)} (recovered)`;
+      path = "";
+    }
+  }
+  tab.path = path;
+  tab.volume = volume;
+  tab.label = label;
+  tab.langPath = langPath;
+  tab.text = text;
+  tab.bytes = null;
+  tab.large = false;
+  tab.dirty = true;
+  tab.encoding = Math.max(0, Math.min(ENCODINGS.length - 1, Number(entry.encoding) || 0));
+  tab.bom = !!entry.bom;
+  tab.sourceCrlf = !!entry.sourceCrlf;
+  tab.eol = Math.max(0, Math.min(2, Number(entry.eol) || 0));
+  tab.docIndent = Number.isInteger(entry.docIndent)
+    ? (entry.docIndent === 1 ? 1 : 0)
+    : detectIndent(text);
+  tab.history = [];
+  tab.historyIndex = -1;
+  tab.historyTime = 0;
+  const len = text.length;
+  tab.cursorStart = Math.max(0, Math.min(len, Number(entry.cursorStart) || 0));
+  tab.cursorEnd = Math.max(tab.cursorStart, Math.min(len, Number(entry.cursorEnd) || tab.cursorStart));
+  tab.scrollTop = Math.max(0, Number(entry.scrollTop) || 0);
+  tab.scrollLeft = Math.max(0, Number(entry.scrollLeft) || 0);
+  tab.largeFirst = 0;
+}
+
+async function restoreUnsavedBackup(backup) {
+  const entries = backup && Array.isArray(backup.tabs) ? backup.tabs : [];
+  if (!entries.length) return false;
+  const map = new Map();
+  let touched = false;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (!entry || typeof entry !== "object") continue;
+    let index = -1;
+    if (entry.path) {
+      index = state.tabs.findIndex((tab) =>
+        tab.path === entry.path && tab.volume === (entry.volume || "internal"));
+    }
+    if (index < 0) {
+      const current = activeTab();
+      const reuse = !!current && !current.path && !current.dirty && !current.large &&
+        !$("editor").value;
+      if (reuse) {
+        index = state.tabIndex;
+      } else {
+        const tab = createTabData({ volume: entry.volume || state.volumes.ref() });
+        state.tabs.push(tab);
+        index = state.tabs.length - 1;
+      }
+    }
+    fillTabFromBackup(state.tabs[index], entry);
+    map.set(i, index);
+    touched = true;
+  }
+  if (!touched) return false;
+  let activeIndex = Number.isInteger(backup.active) ? map.get(backup.active) : undefined;
+  if (activeIndex === undefined) activeIndex = state.tabIndex;
+  state.tabIndex = activeIndex;
+  await applyTabData(state.tabs[activeIndex]);
+  return true;
+}
+
+function flushUnsavedBackup() {
+  if (!state.backupReady) return;
+  saveUnsavedBackupNow();
+}
+
 function readSavedSession() {
   if (!state.settings.restoreSession) return null;
   try {
@@ -3703,6 +3988,7 @@ async function init() {
   }
 
   await state.volumes.init(state.settings.remoteBase);
+  const backup = await readUnsavedBackup();
   const restored = restoreSavedSession();
   document.querySelectorAll(".vol-tab").forEach((tab) => {
     tab.addEventListener("click", async () => {
@@ -3735,8 +4021,18 @@ async function init() {
     } else if (restored?.file) {
       await openPath(restored.file, true);
     }
+    if (backup) {
+      try {
+        await restoreUnsavedBackup(backup);
+      } catch (error) {
+        fail("restore unsaved edits", error);
+      }
+    }
+    state.backupReady = true;
+    if (state.tabs.some((tab) => tab.dirty)) scheduleBackupSave();
     if (window.innerWidth <= 720 && state.path) $("sidebar").classList.add("hidden");
   } else {
+    state.backupReady = false;
     await refreshFiles();
   }
 
@@ -3802,6 +4098,7 @@ function bindEvents() {
     syncEditorToEngine();
     updateDirty(true);
     state.wrapDirty = true;
+    refreshBracketMatch(false);
     rerender();
     if (state.settings.autoSave && state.path) {
       clearTimeout(state.autoSaveTimer);
@@ -3826,10 +4123,10 @@ function bindEvents() {
   editor.addEventListener("cut", copyEditorSelection);
   editor.addEventListener("scroll", rerender, { passive: true });
   $("largeScroll").addEventListener("scroll", () => updateHighlight(), { passive: true });
-  editor.addEventListener("keyup", updateStatus);
-  editor.addEventListener("click", updateStatus);
-  editor.addEventListener("select", updateStatus);
-  editor.addEventListener("selectionchange", updateStatus);
+  editor.addEventListener("keyup", () => { refreshBracketMatch(); updateStatus(); });
+  editor.addEventListener("click", () => { refreshBracketMatch(); updateStatus(); });
+  editor.addEventListener("select", () => { refreshBracketMatch(); updateStatus(); });
+  editor.addEventListener("selectionchange", () => { refreshBracketMatch(); updateStatus(); });
 
   editor.addEventListener("keydown", (event) => {
     if (!event.isComposing && state.settings.wrap &&
@@ -4239,6 +4536,9 @@ function bindEvents() {
     if (document.activeElement !== termInput) termInput.focus({ preventScroll: true });
   });
   termStack.addEventListener("keydown", (event) => {
+    // The keyboard proxy inside the stack handles non-printable keys and
+    // prevents their default; do not send the same arrow/escape byte twice.
+    if (event.defaultPrevented) return;
     if (terminalClipboardShortcut(event)) return;
     if (event.key === "Tab") event.preventDefault();
     const bytes = keyToBytes(event);
@@ -4310,10 +4610,17 @@ function bindEvents() {
   // can report the old viewport when it comes back.  Reconnect and re-measure
   // on every resume path the platform offers.
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) saveSessionNow();
-    else resumeTerminal();
+    if (document.hidden) {
+      saveSessionNow();
+      flushUnsavedBackup();
+    } else {
+      resumeTerminal();
+    }
   });
-  window.addEventListener("pagehide", saveSessionNow);
+  window.addEventListener("pagehide", () => {
+    saveSessionNow();
+    flushUnsavedBackup();
+  });
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) resumeTerminal();
   });
@@ -4594,6 +4901,7 @@ function bindEvents() {
   );
 
   window.addEventListener("beforeunload", (event) => {
+    flushUnsavedBackup();
     if (state.dirty || state.tabs.some((tab) => tab.dirty)) {
       event.preventDefault();
       event.returnValue = "";

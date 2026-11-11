@@ -410,10 +410,58 @@ public:
 		return SIZE_MAX;
 	}
 
+	// Convert a JavaScript UTF-16 code-unit offset into the byte offset used
+	// by the UTF-8 document.  Surrogate pairs count as two UTF-16 units.
+	[[nodiscard]] ::std::size_t utf16_to_utf8_offset(::std::size_t utf16_offset) const noexcept
+	{
+		::std::size_t units{};
+		::std::size_t i{};
+		while (i < text_.size() && units < utf16_offset)
+		{
+			auto const c{static_cast<unsigned char>(text_[i])};
+			::std::size_t len{1};
+			::std::uint_least32_t cp{c};
+			if ((c & 0xE0u) == 0xC0u)
+			{
+				len = 2;
+				cp = c & 0x1Fu;
+			}
+			else if ((c & 0xF0u) == 0xE0u)
+			{
+				len = 3;
+				cp = c & 0x0Fu;
+			}
+			else if ((c & 0xF8u) == 0xF0u)
+			{
+				len = 4;
+				cp = c & 0x07u;
+			}
+			if (i + len > text_.size())
+			{
+				len = text_.size() - i;
+			}
+			for (::std::size_t j{1}; j < len; ++j)
+			{
+				cp = (cp << 6) | (static_cast<unsigned char>(text_[i + j]) & 0x3Fu);
+			}
+			units += cp >= 0x10000u ? 2u : 1u;
+			i += len;
+		}
+		return i;
+	}
+
+	// Bracket matching for a UTF-16 offset from the textarea.  Returns the
+	// matching byte offset (for render_view), or SIZE_MAX when unmatched.
+	[[nodiscard]] ::std::size_t bracket_match_utf16(::std::size_t utf16_offset) const noexcept
+	{
+		return bracket_match(utf16_to_utf8_offset(utf16_offset));
+	}
+
 	// ---- refterm-style partial view ------------------------------------
 
 	void render_view(::std::size_t first_line, ::std::size_t count, bool show_line_numbers,
-					 ::fast_io::u8string &out) const throws
+					 ::fast_io::u8string &out,
+					 ::std::size_t match_offset = SIZE_MAX) const throws
 	{
 		using namespace ::fast_io::io;
 		out.clear();
@@ -442,7 +490,8 @@ public:
 				print(writer, u8"<span class=\"ln\">", ln + 1, u8"</span>");
 			}
 			print(writer, u8"<span class=\"lc\">");
-			syntax::render_line(line(ln), lang_, state, depth, writer);
+			syntax::render_line(line(ln), lang_, state, depth, writer, line_starts_[ln],
+								match_offset);
 			print(writer, u8"</span></div>");
 		}
 	}

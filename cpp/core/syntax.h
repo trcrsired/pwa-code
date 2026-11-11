@@ -228,7 +228,9 @@ inline void span_end(::fast_io::u8ostring_ref_fast_io out) throws
 // Render one line.  `depth` carries the bracket nesting depth across lines;
 // `state.in_block_comment` carries block-comment state.
 inline void render_line(::fast_io::u8string_view line, keywords::language const *lang,
-						render_state &state, int &depth, ::fast_io::u8ostring_ref_fast_io out) throws
+						render_state &state, int &depth, ::fast_io::u8ostring_ref_fast_io out,
+						::std::size_t line_start = 0,
+						::std::size_t match_offset = SIZE_MAX) throws
 {
 	using namespace ::fast_io::io;
 	auto const line_comment{lang ? lang->line_comment : ::fast_io::u8string_view{}};
@@ -421,7 +423,12 @@ inline void render_line(::fast_io::u8string_view line, keywords::language const 
 				--depth;
 			}
 			auto const slot{static_cast<::std::size_t>(depth % 3)};
-			print(out, u8"<span class=\"t-b", slot, u8"\">");
+			print(out, u8"<span class=\"t-b", slot);
+			if (match_offset != SIZE_MAX && line_start + i == match_offset)
+			{
+				print(out, u8" bm");
+			}
+			print(out, u8"\">");
 			print_escaped_char(out, line[i]);
 			span_end(out);
 			if (!closing)

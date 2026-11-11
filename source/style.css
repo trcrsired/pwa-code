@@ -633,6 +633,13 @@ body.large-mode .editor { visibility: hidden; }
 }
 .highlight .lc { white-space: pre; }
 
+/* The bracket matching the one under the caret. */
+.highlight .bm {
+  background: var(--selection);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  border-radius: 2px;
+}
+
 /* Wrapped rendering: logical lines may occupy several visual rows. */
 body.wrap-mode .highlight { box-sizing: border-box; width: 100%; }
 body.wrap-mode .highlight .vl {

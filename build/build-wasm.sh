@@ -64,6 +64,7 @@ EXPORTS="
 -Wl,--export=pwa_doc_save_text
 -Wl,--export=pwa_view
 -Wl,--export=pwa_bracket_match
+-Wl,--export=pwa_bracket_match_utf16
 -Wl,--export=pwa_indent
 -Wl,--export=pwa_line_start
 -Wl,--export=pwa_line_of_offset
