@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS = {
   wrap: false,
   bracketColor: true,
   conflictDisplay: true,
+  restoreSession: true,
   encoding: 0,
   eol: 0,
   remoteBase: "",
@@ -1143,7 +1144,7 @@ function isLargeDocument(info) {
   return info.size > LARGE_FILE_BYTES || info.lineCount > LARGE_FILE_LINES;
 }
 
-async function openPath(path) {
+async function openPath(path, quiet = false) {
   try {
     const volume = state.volumes.active();
     const bytes = await volume.read(path);
@@ -1180,8 +1181,9 @@ async function openPath(path) {
     );
     renderWindow();
     if (!large) $("editor").focus();
+    scheduleSessionSave();
   } catch (error) {
-    fail("open", error);
+    if (!quiet) fail("open", error);
   }
 }
 
@@ -1261,6 +1263,7 @@ async function refreshFiles() {
     }
   }
   setPathDisplay();
+  scheduleSessionSave();
 }
 
 function currentEntryPath(entry) {
@@ -1642,6 +1645,7 @@ function closeDocument() {
   $("statusEol").textContent = EOL_LABELS[0];
   $("docName").textContent = "untitled";
   updateDirty(false);
+  scheduleSessionSave();
   toast(`closed ${name}`);
 }
 
@@ -2527,6 +2531,7 @@ function populateSettingsForm() {
   $("setAutoSave").checked = s.autoSave;
   $("setBracketColor").checked = s.bracketColor;
   $("setConflictDisplay").checked = s.conflictDisplay !== false;
+  $("setRestoreSession").checked = s.restoreSession !== false;
   $("setEncoding").value = String(s.encoding);
   $("setEol").value = String(s.eol);
   $("setRemoteBase").value = s.remoteBase;
@@ -2559,6 +2564,7 @@ async function applySettingsForm() {
   s.autoSave = $("setAutoSave").checked;
   s.bracketColor = $("setBracketColor").checked;
   s.conflictDisplay = $("setConflictDisplay").checked;
+  s.restoreSession = $("setRestoreSession").checked;
   s.encoding = Number($("setEncoding").value) || 0;
   s.eol = Number($("setEol").value) || 0;
   s.remoteBase = $("setRemoteBase").value.trim();
@@ -2586,6 +2592,85 @@ async function applySettingsForm() {
 
 /* ------------------------------------------------------------------ init */
 
+/* ------------------------------------------------------- session restore */
+
+const SESSION_KEY = "pwacode.session.v1";
+let sessionSaveTimer = 0;
+
+function saveSessionNow() {
+  if (sessionSaveTimer) {
+    clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = 0;
+  }
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      volume: state.volumes.ref(),
+      dir: state.volumes.path,
+      file: state.path || "",
+      fileVolume: state.path ? state.volume : "",
+    }));
+  } catch {
+    /* private mode */
+  }
+}
+
+function scheduleSessionSave() {
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(saveSessionNow, 250);
+}
+
+function readSavedSession() {
+  if (!state.settings.restoreSession) return null;
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function applySavedLocation(ref, dir) {
+  const colon = String(ref || "").indexOf(":");
+  const kind = colon < 0 ? String(ref || "internal") : String(ref).slice(0, colon);
+  const id = colon < 0 ? "" : String(ref).slice(colon + 1);
+  if (kind !== "internal" && kind !== "external" && kind !== "remote") return false;
+  if (kind !== "internal" && !id) return false;
+  setVolTab(kind);
+  if (kind !== "internal") state.volumes.selected[kind] = id;
+  try {
+    state.volumes.get(kind === "internal" ? "internal" : `${kind}:${id}`);
+  } catch {
+    setVolTab("internal");
+    state.volumes.path = "";
+    return false;
+  }
+  state.volumes.path = String(dir || "");
+  renderMountBar();
+  return true;
+}
+
+// Restore the location of the last edit.  The file wins over the explorer tab:
+// if the user left a file open and then browsed elsewhere, startup returns to
+// the file's folder and opens it again.
+function restoreSavedSession() {
+  const saved = readSavedSession();
+  if (!saved) {
+    setVolTab("internal");
+    return null;
+  }
+  if (saved.file && saved.fileVolume) {
+    if (applySavedLocation(saved.fileVolume, parentPath(saved.file))) {
+      return { file: saved.file };
+    }
+  }
+  if (saved.volume) {
+    applySavedLocation(saved.volume, saved.dir);
+  } else {
+    setVolTab("internal");
+  }
+  return null;
+}
+
 async function init() {
   readSettings();
   fillEncodingOptions();
@@ -2602,7 +2687,7 @@ async function init() {
   }
 
   await state.volumes.init(state.settings.remoteBase);
-  setVolTab("internal");
+  const restored = restoreSavedSession();
   document.querySelectorAll(".vol-tab").forEach((tab) => {
     tab.addEventListener("click", async () => {
       setVolTab(tab.dataset.vol);
@@ -2616,6 +2701,10 @@ async function init() {
     if (!state.path) {
       setEditorText("");
       updateDirty(false);
+    }
+    if (restored?.file) {
+      await openPath(restored.file, true);
+      if (window.innerWidth <= 720) $("sidebar").classList.add("hidden");
     }
   } else {
     await refreshFiles();
@@ -3048,8 +3137,10 @@ function bindEvents() {
   // can report the old viewport when it comes back.  Reconnect and re-measure
   // on every resume path the platform offers.
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) resumeTerminal();
+    if (document.hidden) saveSessionNow();
+    else resumeTerminal();
   });
+  window.addEventListener("pagehide", saveSessionNow);
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) resumeTerminal();
   });
