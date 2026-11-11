@@ -17,7 +17,8 @@ const DEFAULT_SETTINGS = {
   lineHeight: 20,
   lineNumbers: true,
   softKeyboard: false,
-  indent: 0,
+  indent: -1,
+  indentExplicit: false,
   autoSave: false,
   wrap: false,
   bracketColor: true,
@@ -66,7 +67,16 @@ const state = {
   clipboard: null,
   fileMenuEntry: null,
   termQueue: [],
+  termSession: "",
+  termReplay: true,
+  termRetry: 0,
+  termRetryTimer: 0,
   softTarget: "editor",
+  conflicts: [],
+  conflictLines: new Map(),
+  conflictTimer: 0,
+  activeConflict: -1,
+  docIndent: 0,
 };
 
 // A textarea with tens of millions of lines takes minutes to lay out and
@@ -120,7 +130,13 @@ function saveSettings() {
 function readSettings() {
   try {
     const raw = localStorage.getItem("pwacode.settings.v1");
-    if (raw) state.settings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const saved = JSON.parse(raw);
+      state.settings = { ...DEFAULT_SETTINGS, ...saved };
+      // Older builds always stored an explicit 0 (two spaces).  Unless the
+      // user has touched the indent choice since, default that file to Auto.
+      if (!saved.indentExplicit) state.settings.indent = -1;
+    }
   } catch {
     state.settings = { ...DEFAULT_SETTINGS };
   }
@@ -275,6 +291,10 @@ function renderGutter(first, count) {
     // so the number sits at the top of its block.
     div.style.height = `${(state.settings.wrap && !state.largeMode ? wrapRowsOf(n) : 1) * lineHeight}px`;
     div.style.lineHeight = `${lineHeight}px`;
+    const conflict = state.conflictLines.get(n);
+    if (conflict === "cf-ours") div.classList.add("cf-ours");
+    else if (conflict === "cf-theirs") div.classList.add("cf-theirs");
+    else if (conflict) div.classList.add("cf-marker");
     frag.appendChild(div);
   }
   const gutter = $("gutter");
@@ -283,6 +303,254 @@ function renderGutter(first, count) {
   const digits = Math.max(2, String(state.engine.lineCount).length);
   const width = Math.max(38, digits * (state.settings.fontSize * 0.62) + 20);
   document.documentElement.style.setProperty("--gutter-w", `${width}px`);
+}
+
+/* -------------------------------------------------------- merge conflicts */
+
+// Git conflict markers are fixed seven-character runs.  A marker may carry a
+// label ("<<<<<<< HEAD"), but a longer run of '<' inside normal text is not a
+// marker, so the character after the run must be a space/tab or end of line.
+function isConflictMarker(line, ch) {
+  return line.startsWith(ch.repeat(7)) &&
+    (line.length === 7 || line[7] === " " || line[7] === "\t");
+}
+
+function scanConflicts(text) {
+  const conflicts = [];
+  let cur = null;
+  let line = 0;
+  let offset = 0;
+  const len = text.length;
+  while (offset <= len) {
+    const nl = text.indexOf("\n", offset);
+    const end = nl < 0 ? len : nl;
+    const lineText = text.slice(offset, end);
+    const nextLine = nl < 0 ? len : nl + 1;
+    if (!cur && isConflictMarker(lineText, "<")) {
+      cur = {
+        startLine: line,
+        startOffset: offset,
+        oursStartOffset: nextLine,
+        oursEndOffset: -1,
+        baseLine: -1,
+        baseStartOffset: -1,
+        baseEndOffset: -1,
+        sepLine: -1,
+        theirsStartOffset: -1,
+        theirsEndOffset: -1,
+        endLine: -1,
+        endOffset: -1,
+        oursLabel: lineText.slice(7).trim(),
+        baseLabel: "",
+        theirsLabel: "",
+      };
+    } else if (cur && cur.baseLine < 0 && isConflictMarker(lineText, "|")) {
+      cur.baseLine = line;
+      cur.baseLabel = lineText.slice(7).trim();
+      cur.oursEndOffset = offset;
+      cur.baseStartOffset = nextLine;
+    } else if (cur && cur.sepLine < 0 && isConflictMarker(lineText, "=")) {
+      cur.sepLine = line;
+      if (cur.baseLine < 0) {
+        cur.oursEndOffset = offset;
+      } else {
+        cur.baseEndOffset = offset;
+      }
+      cur.theirsStartOffset = nextLine;
+    } else if (cur && isConflictMarker(lineText, ">")) {
+      cur.endLine = line;
+      cur.theirsEndOffset = offset;
+      cur.endOffset = nextLine;
+      cur.theirsLabel = lineText.slice(7).trim();
+      if (cur.sepLine >= 0 && cur.oursEndOffset >= 0) conflicts.push(cur);
+      cur = null;
+    }
+    if (nl < 0) break;
+    offset = nextLine;
+    line++;
+  }
+  return conflicts;
+}
+
+function conflictPreview(text, start, end) {
+  if (start < 0 || end < 0 || end <= start) return "";
+  const block = text.slice(start, end);
+  for (const line of block.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed) return trimmed;
+  }
+  return "(empty)";
+}
+
+function buildConflictLineMap(conflicts) {
+  const map = new Map();
+  for (const c of conflicts) {
+    map.set(c.startLine, "cf-start");
+    map.set(c.sepLine, "cf-sep");
+    map.set(c.endLine, "cf-end");
+    if (c.baseLine >= 0) map.set(c.baseLine, "cf-basemarker");
+    const oursEnd = c.baseLine >= 0 ? c.baseLine : c.sepLine;
+    for (let line = c.startLine + 1; line < oursEnd; line++) map.set(line, "cf-ours");
+    if (c.baseLine >= 0) {
+      for (let line = c.baseLine + 1; line < c.sepLine; line++) map.set(line, "cf-base");
+    }
+    for (let line = c.sepLine + 1; line < c.endLine; line++) map.set(line, "cf-theirs");
+  }
+  return map;
+}
+
+function refreshConflicts() {
+  if (state.conflictTimer) {
+    clearTimeout(state.conflictTimer);
+    state.conflictTimer = 0;
+  }
+  if (state.largeMode || !state.engineReady) {
+    state.conflicts = [];
+    state.conflictLines = new Map();
+    state.activeConflict = -1;
+    updateConflictUI();
+    return;
+  }
+  const text = $("editor").value;
+  state.conflicts = text.includes("<<<<<<<") ? scanConflicts(text) : [];
+  state.conflictLines = buildConflictLineMap(state.conflicts);
+  if (state.activeConflict >= state.conflicts.length) {
+    state.activeConflict = state.conflicts.length - 1;
+  }
+  updateConflictUI();
+}
+
+function scheduleConflictRefresh() {
+  if (state.conflictTimer) clearTimeout(state.conflictTimer);
+  state.conflictTimer = setTimeout(() => {
+    state.conflictTimer = 0;
+    refreshConflicts();
+    updateHighlight();
+  }, 90);
+}
+
+function applyConflictClasses(container) {
+  if (!state.conflictLines.size) return;
+  for (const el of container.querySelectorAll(".vl[data-l]")) {
+    const cls = state.conflictLines.get(Number(el.dataset.l));
+    if (cls) el.classList.add(cls);
+  }
+}
+
+function updateConflictUI() {
+  const button = $("statusConflicts");
+  const count = state.conflicts.length;
+  if (button) {
+    button.hidden = count === 0;
+    button.textContent = `Conflicts ${count}`;
+    button.classList.toggle("on", count !== 0);
+  }
+  const panel = $("conflictPanel");
+  if (!panel) return;
+  if (!count) {
+    panel.hidden = true;
+    state.activeConflict = -1;
+    return;
+  }
+  if (!panel.hidden) renderConflictList();
+}
+
+function renderConflictList() {
+  const list = $("conflictList");
+  if (!list) return;
+  const editor = $("editor");
+  const text = editor.value;
+  list.textContent = "";
+  const title = $("conflictTitle");
+  if (title) title.textContent = `${state.conflicts.length} merge conflict${state.conflicts.length === 1 ? "" : "s"}`;
+  state.conflicts.forEach((c, index) => {
+    const item = document.createElement("div");
+    item.className = "conflict-item";
+    item.dataset.index = String(index);
+    if (index === state.activeConflict) item.classList.add("active");
+    const head = document.createElement("div");
+    head.className = "conflict-item-head";
+    const name = document.createElement("strong");
+    name.textContent = `Conflict ${index + 1}`;
+    const lines = document.createElement("span");
+    lines.className = "cf-lines";
+    lines.textContent = `Ln ${c.startLine + 1}–${c.endLine + 1}`;
+    head.append(name, lines);
+    const ours = document.createElement("span");
+    ours.className = "conflict-preview ours";
+    ours.textContent = `ours: ${c.oursLabel || "current"} — ${conflictPreview(text, c.oursStartOffset, c.oursEndOffset)}`;
+    const theirs = document.createElement("span");
+    theirs.className = "conflict-preview theirs";
+    theirs.textContent = `theirs: ${c.theirsLabel || "incoming"} — ${conflictPreview(text, c.theirsStartOffset, c.theirsEndOffset)}`;
+    item.append(head, ours);
+    if (c.baseLine >= 0) {
+      const base = document.createElement("span");
+      base.className = "conflict-preview base";
+      base.textContent = `base: ${c.baseLabel || "ancestor"} — ${conflictPreview(text, c.baseStartOffset, c.baseEndOffset)}`;
+      item.appendChild(base);
+    }
+    item.appendChild(theirs);
+    const actions = document.createElement("div");
+    actions.className = "conflict-item-actions";
+    for (const [mode, label, cls] of [
+      ["ours", "Accept ours", "ours"],
+      ["theirs", "Accept theirs", "theirs"],
+      ["both", "Accept both", ""],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `mini-btn ${cls}`;
+      button.textContent = label;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        resolveConflict(index, mode);
+      });
+      actions.appendChild(button);
+    }
+    item.appendChild(actions);
+    item.addEventListener("click", () => jumpToConflict(index));
+    list.appendChild(item);
+    if (index === state.activeConflict) {
+      requestAnimationFrame(() => item.scrollIntoView({ block: "nearest" }));
+    }
+  });
+}
+
+function jumpToConflict(index) {
+  const c = state.conflicts[index];
+  if (!c) return;
+  state.activeConflict = index;
+  const editor = $("editor");
+  editor.focus({ preventScroll: true });
+  editor.setSelectionRange(c.startOffset, c.endOffset);
+  revealSelection();
+  updateStatus();
+  renderConflictList();
+}
+
+function stepConflict(delta) {
+  if (!state.conflicts.length) return;
+  let index = state.activeConflict;
+  if (index < 0) index = delta > 0 ? -1 : 0;
+  index = (index + delta + state.conflicts.length) % state.conflicts.length;
+  $("conflictPanel").hidden = false;
+  jumpToConflict(index);
+}
+
+function resolveConflict(index, mode) {
+  const c = state.conflicts[index];
+  if (!c) return;
+  const editor = $("editor");
+  const text = editor.value;
+  const ours = text.slice(c.oursStartOffset, c.oursEndOffset);
+  const theirs = text.slice(c.theirsStartOffset, c.theirsEndOffset);
+  const replacement = mode === "ours" ? ours : mode === "theirs" ? theirs : ours + theirs;
+  editor.focus({ preventScroll: true });
+  editor.setRangeText(replacement, c.startOffset, c.endOffset, "end");
+  editor.dispatchEvent(new Event("input"));
+  refreshConflicts();
+  updateHighlight();
+  toast(`resolved conflict ${index + 1}: ${mode === "both" ? "both sides" : mode}`);
 }
 
 function updateHighlight() {
@@ -437,6 +705,10 @@ function enterLargeMode(info) {
   updateLargeSpacer();
   document.body.classList.add("large-mode");
   state.wrapDirty = true;
+  state.conflicts = [];
+  state.conflictLines = new Map();
+  state.activeConflict = -1;
+  updateConflictUI();
 }
 
 function exitLargeMode() {
@@ -491,6 +763,7 @@ function renderLargeWindow() {
   const hl = $("highlight");
   hl.style.width = `${scroll.clientWidth}px`;
   hl.innerHTML = html;
+  applyConflictClasses(hl);
   hl.style.transform = `translate(0px, ${-offsetY}px)`;
   renderGutter(first, count);
   const gutterInner = $("gutter");
@@ -536,6 +809,7 @@ function renderWindow() {
   const hl = $("highlight");
   if (wrap && editor.clientWidth > 0) hl.style.width = `${editorInnerWidth(editor)}px`;
   hl.innerHTML = html;
+  applyConflictClasses(hl);
   const top =
     wrap && state.wrapOffsets && state.wrapOffsets[first] !== undefined
       ? state.wrapOffsets[first] * lineHeight
@@ -593,16 +867,19 @@ function syncEditorToEngine() {
     }
   }
   updateStatus();
+  scheduleConflictRefresh();
 }
 
 function setEditorText(text) {
   const editor = $("editor");
   editor.value = text;
   state.prevText = text;
+  state.docIndent = detectIndent(text);
   editor.scrollTop = 0;
   editor.scrollLeft = 0;
   state.wrapDirty = true;
   resetHistory();
+  refreshConflicts();
   updateHighlight();
   updateStatus();
 }
@@ -881,6 +1158,10 @@ async function openPath(path) {
     $("hexWrap").hidden = true;
     $("editorWrap").hidden = false;
     $("docName").textContent = large ? `${path} (view)` : path;
+    if (!large && state.conflicts.length) {
+      $("conflictPanel").hidden = false;
+      renderConflictList();
+    }
     toast(
       `${path} • ${info.encodingName}${info.sourceCrlf ? " • CRLF" : ""}` +
         (large ? " • large file: read-only partial view" : ""),
@@ -1305,6 +1586,9 @@ async function saveDocument(saveAs = false, ask = false) {
   }
   try {
     syncEditorToEngine();
+    // A newly typed file has no open-time sample; learn its style on save so
+    // the next Tab respects what the user just wrote.
+    state.docIndent = detectIndent($("editor").value);
     state.engine.setEncoding(state.engine.encoding, state.engine.bom);
     state.engine.setEol(state.settings.eol);
     const bytes = state.engine.saveText();
@@ -1484,11 +1768,52 @@ async function saveHex() {
 
 /* -------------------------------------------------------------- terminal */
 
+// The PTY lives in the native server now, so the browser only needs to
+// remember which shell it belongs to.  sessionStorage survives a reload and a
+// background/foreground cycle in the same tab without making a second tab
+// hijack the same shell.
+function terminalSessionId() {
+  if (state.termSession) return state.termSession;
+  let id = "";
+  try {
+    id = sessionStorage.getItem("pwacode.term.session") || "";
+  } catch {
+    /* private mode */
+  }
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(id)) {
+    const bytes = new Uint8Array(16);
+    if (window.crypto?.getRandomValues) {
+      crypto.getRandomValues(bytes);
+      id = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+    } else {
+      id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+    }
+    try {
+      sessionStorage.setItem("pwacode.term.session", id);
+    } catch {
+      /* private mode */
+    }
+  }
+  state.termSession = id;
+  return id;
+}
+
+function clearTerminalSession() {
+  state.termSession = "";
+  try {
+    sessionStorage.removeItem("pwacode.term.session");
+  } catch {
+    /* private mode */
+  }
+}
+
 function terminalUrl() {
-  if (state.settings.termUrl) return state.settings.termUrl;
-  // A remote mount of the pwa-code server family also carries the PTY
-  // terminal, so "connect" targets the machine whose files are open.
-  if (state.volumes.current === "remote") {
+  let base = "";
+  if (state.settings.termUrl) {
+    base = state.settings.termUrl;
+  } else if (state.volumes.current === "remote") {
+    // A remote mount of the pwa-code server family also carries the PTY
+    // terminal, so "connect" targets the machine whose files are open.
     let volume = null;
     try {
       volume = state.volumes.get(state.volumes.ref());
@@ -1502,14 +1827,20 @@ function terminalUrl() {
         url.pathname = `${url.pathname.replace(/\/+$/, "")}/ws/term`;
         url.search = "";
         url.hash = "";
-        return url.toString();
+        base = url.toString();
       } catch {
         /* fall through to same origin */
       }
     }
   }
-  const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${proto}//${location.host}/ws/term`;
+  if (!base) {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    base = `${proto}//${location.host}/ws/term`;
+  }
+  const url = new URL(base);
+  url.searchParams.set("session", terminalSessionId());
+  url.searchParams.set("replay", state.termReplay ? "1" : "0");
+  return url.toString();
 }
 
 function terminalVisible() {
@@ -1531,8 +1862,25 @@ function ensureTerminalConnection() {
   connectTerminal();
 }
 
+function scheduleTerminalRetry() {
+  if (!terminalVisible() || document.hidden) return;
+  if (state.termRetry >= 8) return;
+  if (state.termRetryTimer) return;
+  const delay = Math.min(500 * (2 ** state.termRetry), 4000);
+  state.termRetry++;
+  $("termStatus").textContent = "reconnecting…";
+  state.termRetryTimer = setTimeout(() => {
+    state.termRetryTimer = 0;
+    ensureTerminalConnection();
+  }, delay);
+}
+
 function connectTerminal() {
   if (!terminalVisible()) return;
+  if (state.termRetryTimer) {
+    clearTimeout(state.termRetryTimer);
+    state.termRetryTimer = 0;
+  }
   if (state.ws) {
     const old = state.ws;
     state.ws = null;
@@ -1553,6 +1901,8 @@ function connectTerminal() {
     state.ws = ws;
     ws.onopen = () => {
       if (state.ws !== ws) return;
+      state.termRetry = 0;
+      state.termReplay = false;
       $("termStatus").textContent = "connected";
       $("termInput").focus({ preventScroll: true });
       // Tell the PTY its size before replaying anything the user typed while
@@ -1568,11 +1918,14 @@ function connectTerminal() {
       if (state.ws !== ws) return;
       state.ws = null;
       $("termStatus").textContent = "disconnected";
+      scheduleTerminalRetry();
     };
     ws.onerror = () => {
       if (state.ws !== ws) return;
       $("termStatus").textContent = "error";
-      toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
+      if (state.termRetry === 0) {
+        toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
+      }
     };
     ws.onmessage = (event) => {
       if (state.ws !== ws) return;
@@ -1643,9 +1996,24 @@ function toggleTerminal(show) {
     if (state.ws) {
       const ws = state.ws;
       state.ws = null;
-      try { ws.close(); } catch { /* already closed */ }
+      try {
+        // [3] terminates the server-side shell.  Without it the session would
+        // be kept for a later reattach, which is not what Close means.
+        if (ws.readyState === WebSocket.OPEN) ws.send(new Uint8Array([3]));
+        ws.close();
+      } catch {
+        /* already closed */
+      }
     }
+    if (state.termRetryTimer) {
+      clearTimeout(state.termRetryTimer);
+      state.termRetryTimer = 0;
+    }
+    state.termRetry = 0;
     state.termQueue = [];
+    clearTerminalSession();
+    state.termReplay = true;
+    if (state.term) state.term.clear();
     $("termStatus").textContent = "disconnected";
     $("editorWrap").hidden = state.hexMode;
     if (state.hexMode) $("hexWrap").hidden = false;
@@ -1772,6 +2140,39 @@ function positionSoftKeyboard() {
   kb.style.bottom = covered ? `${covered}px` : "";
 }
 
+// Detect whether a file indents with tabs or with spaces.  The product only
+// distinguishes those two modes; a 4-space file is treated as space-indented
+// and the editor keeps using two-space steps.
+function detectIndent(text) {
+  let tabs = 0;
+  let spaces = 0;
+  let offset = 0;
+  let lines = 0;
+  const limit = Math.min(text.length, 256 * 1024);
+  while (offset < limit && lines < 4000) {
+    const nl = text.indexOf("\n", offset);
+    const end = nl < 0 || nl > limit ? limit : nl;
+    const line = text.slice(offset, end);
+    if (line && line.trim()) {
+      if (line[0] === "\t") {
+        tabs++;
+      } else {
+        let n = 0;
+        while (n < line.length && line[n] === " ") n++;
+        if (n >= 2) spaces++;
+      }
+    }
+    if (nl < 0 || nl >= limit) break;
+    offset = nl + 1;
+    lines++;
+  }
+  return tabs > spaces ? 1 : 0;
+}
+
+function effectiveIndent() {
+  return state.settings.indent === -1 ? state.docIndent : state.settings.indent;
+}
+
 // The extra key row belongs to whichever surface currently has the caret.
 // Merely having the terminal open must not steal Esc/Tab/arrows from an editor
 // the user is typing in.
@@ -1790,7 +2191,7 @@ function editorKeyCommand(key, mods) {
   if (document.activeElement !== editor && mods.ctrl) editor.focus();
   switch (key) {
     case "Tab":
-      insertAtCursor(state.settings.indent === 1 ? "\t" : "  ");
+      insertAtCursor(effectiveIndent() === 1 ? "\t" : "  ");
       return true;
     case "Enter":
       insertNewline();
@@ -2107,6 +2508,10 @@ function populateSettingsForm() {
   $("setWrap").checked = s.wrap;
   $("setSoftKeyboard").checked = s.softKeyboard;
   $("setIndent").value = String(s.indent);
+  const autoIndent = $("setIndent").querySelector('option[value="-1"]');
+  if (autoIndent) {
+    autoIndent.textContent = `Auto (detected: ${state.docIndent === 1 ? "Tab" : "2 spaces"})`;
+  }
   $("setAutoSave").checked = s.autoSave;
   $("setBracketColor").checked = s.bracketColor;
   $("setEncoding").value = String(s.encoding);
@@ -2135,7 +2540,9 @@ async function applySettingsForm() {
   s.lineNumbers = $("setLineNumbers").checked;
   s.wrap = $("setWrap").checked;
   s.softKeyboard = $("setSoftKeyboard").checked;
-  s.indent = Number($("setIndent").value) || 0;
+  s.indent = Number($("setIndent").value);
+  if (!Number.isFinite(s.indent)) s.indent = -1;
+  s.indentExplicit = s.indent !== -1;
   s.autoSave = $("setAutoSave").checked;
   s.bracketColor = $("setBracketColor").checked;
   s.encoding = Number($("setEncoding").value) || 0;
@@ -2306,7 +2713,7 @@ function bindEvents() {
         }
         editor.dispatchEvent(new Event("input"));
       } else {
-        insertAtCursor(state.settings.indent === 1 ? "\t" : "  ");
+        insertAtCursor(effectiveIndent() === 1 ? "\t" : "  ");
       }
       return;
     }
@@ -2472,6 +2879,26 @@ function bindEvents() {
       if (state.statusEditing) endStatusEdit(false);
     });
   }
+  $("statusConflicts").addEventListener("click", () => {
+    const panel = $("conflictPanel");
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) {
+      if (state.activeConflict < 0 && state.conflicts.length) {
+        jumpToConflict(0);
+      } else {
+        renderConflictList();
+      }
+    }
+  });
+  $("conflictPrev").addEventListener("click", () => stepConflict(-1));
+  $("conflictNext").addEventListener("click", () => stepConflict(1));
+  $("conflictClose").addEventListener("click", () => { $("conflictPanel").hidden = true; });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "F8" && state.conflicts.length) {
+      event.preventDefault();
+      stepConflict(event.shiftKey ? -1 : 1);
+    }
+  });
   $("openBtn").addEventListener("click", () => $("fileInput").click());
   $("propsClose").addEventListener("click", () => { $("propsModal").hidden = true; });
   $("propsOk").addEventListener("click", () => { $("propsModal").hidden = true; });
@@ -2489,6 +2916,9 @@ function bindEvents() {
     if (event.key === "Escape" && !$("fileMenu").hidden) {
       event.preventDefault();
       closeFileMenu();
+    } else if (event.key === "Escape" && !$("conflictPanel").hidden) {
+      event.preventDefault();
+      $("conflictPanel").hidden = true;
     }
   });
   $("fileList").addEventListener("scroll", closeFileMenu, { passive: true });

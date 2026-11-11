@@ -1223,177 +1223,436 @@ bool slice_elapsed(::std::error const &e) noexcept
 #endif
 }
 
-fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
-								request const &req) throws
-{
-	char8_t accept[fi::websocket_accept_key_size];
-	fi::websocket_accept_key(accept, req.ws_key.data(), req.ws_key.size());
-	co_await fi::io::async_print(
-		sched, {}, sock,
-		u8"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-		u8"Sec-WebSocket-Accept: ",
-		fi::u8string_view{accept, fi::websocket_accept_key_size}, u8"\r\n\r\n");
-	co_await fop::async_output_stream_flush(sched, {}, sock);
+/* ------------------------ persistent sessions ----------------------- */
 
-	terminal_process proc{};
+// A browser PWA frequently loses its WebSocket when it is backgrounded.  The
+// PTY must outlive that socket, so sessions are kept here and a reconnecting
+// browser attaches to the same shell by id.  Output read while a client is
+// attached is retained in a bounded scrollback; output produced while nobody
+// is attached stays in the kernel PTY buffer and is drained on reattach (the
+// shell pauses if that buffer fills, so nothing is silently lost).
+struct terminal_session
+{
+	terminal_session() noexcept = default;
+	fi::u8string id;
+	terminal_process proc;
+	fi::vector<::std::byte> scrollback;
+	::std::size_t scrollback_base{};
+	::std::size_t detach_pos{};
+	bool attached{};
+	bool dead{};
+	bool persistent{};
+	::std::int_least64_t detached_at{};
+	::std::uint_least16_t cols{80};
+	::std::uint_least16_t rows{24};
+};
+
+constexpr ::std::size_t terminal_scrollback_limit{512u << 10};
+constexpr ::std::size_t terminal_scrollback_slack{64u << 10};
+constexpr ::std::int_least64_t terminal_session_ttl{30 * 60};
+
+fi::vector<terminal_session *> &terminal_sessions() noexcept
+{
+	static fi::vector<terminal_session *> sessions;
+	return sessions;
+}
+
+// Read one key=value pair from a raw query string.  Session ids and the replay
+// flag are plain ASCII, so percent decoding is deliberately not needed here.
+fi::u8string_view query_value(fi::u8string_view query, fi::u8string_view key) noexcept
+{
+	::std::size_t i{};
+	while (i < query.size())
+	{
+		auto end{i};
+		while (end < query.size() && query[end] != u8'&')
+		{
+			++end;
+		}
+		auto const pair{fi::u8string_view{query.data() + i, end - i}};
+		if (pair.size() > key.size() && pair[key.size()] == u8'=' &&
+			fi::u8string_view{pair.data(), key.size()} == key)
+		{
+			return fi::u8string_view{pair.data() + key.size() + 1,
+									 pair.size() - key.size() - 1};
+		}
+		i = end + 1;
+	}
+	return {};
+}
+
+bool valid_terminal_session_id(fi::u8string_view id) noexcept
+{
+	if (id.size() < 8 || id.size() > 64)
+	{
+		return false;
+	}
+	for (auto const c : id)
+	{
+		bool const ok{(c >= u8'a' && c <= u8'z') || (c >= u8'A' && c <= u8'Z') ||
+					  (c >= u8'0' && c <= u8'9') || c == u8'-' || c == u8'_'};
+		if (!ok)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+terminal_session *find_terminal_session(fi::u8string_view id) noexcept
+{
+	for (auto *session : terminal_sessions())
+	{
+		if (fi::u8string_view{session->id.data(), session->id.size()} == id)
+		{
+			return session;
+		}
+	}
+	return nullptr;
+}
+
+void unregister_terminal_session(terminal_session *session) throws
+{
+	auto &sessions{terminal_sessions()};
+	for (::std::size_t i{}; i != sessions.size(); ++i)
+	{
+		if (sessions[i] == session)
+		{
+			sessions.erase(sessions.begin() + i);
+			return;
+		}
+	}
+}
+
+void destroy_terminal_session(terminal_session *session) noexcept
+{
+	close_pty(session->proc);
+	delete session;
+}
+
+// Detached sessions are dropped lazily when the next terminal connects.  This
+// avoids a background timer while still bounding the number of orphaned shells.
+void purge_terminal_sessions() throws
+{
+	auto &sessions{terminal_sessions()};
+	auto const now{static_cast<::std::int_least64_t>(::fast_io::posix_clock_gettime(::fast_io::posix_clock_id::realtime).tv_sec)};
+	::std::size_t i{};
+	while (i < sessions.size())
+	{
+		auto *session{sessions[i]};
+		bool const stale{!session->attached &&
+						 (session->dead ||
+						  (session->detached_at != 0 &&
+						   now - session->detached_at > terminal_session_ttl))};
+		if (stale)
+		{
+			sessions.erase(sessions.begin() + i);
+			destroy_terminal_session(session);
+		}
+		else
+		{
+			++i;
+		}
+	}
+}
+
+void terminal_scrollback_append(terminal_session *session, ::std::byte const *data,
+								::std::size_t len) throws
+{
+	for (::std::size_t i{}; i != len; ++i)
+	{
+		session->scrollback.push_back(data[i]);
+	}
+	if (session->scrollback.size() > terminal_scrollback_limit + terminal_scrollback_slack)
+	{
+		auto const drop{session->scrollback.size() - terminal_scrollback_limit};
+		session->scrollback.erase(session->scrollback.begin(),
+								  session->scrollback.begin() + drop);
+		session->scrollback_base += drop;
+	}
+}
+
+terminal_session *create_terminal_session(fi::u8string_view id, bool persistent,
+										  fi::u8string_view shell) throws
+{
+	auto *session{new terminal_session{}};
+	try
+	{
+		if (!id.is_empty())
+		{
+			session->id.assign(fi::u8string_view{id.data(), id.size()});
+		}
+		session->persistent = persistent;
 #if defined(_WIN32)
-	spawn_pty(proc);
-	fi::u8win32_io_observer const pty_in{proc.input};
-	fi::u8win32_io_observer const pty_out{proc.output};
+		(void)shell;
+		spawn_pty(session->proc);
+#else
+		spawn_pty(shell, session->proc);
+#endif
+	}
+	catch throws(::std::error e)
+	{
+		delete session;
+		throw throws e;
+	}
+	if (persistent)
+	{
+		terminal_sessions().push_back(session);
+	}
+	return session;
+}
+
+fi::io_async_task<> send_session_scrollback(fi::io_async_observer sched, auto sock_io,
+										   terminal_session *session,
+										   bool replay) throws
+{
+	auto const end{session->scrollback_base + session->scrollback.size()};
+	auto pos{replay ? session->scrollback_base : session->detach_pos};
+	if (pos < session->scrollback_base)
+	{
+		pos = session->scrollback_base;
+	}
+	while (pos < end)
+	{
+		auto const want{end - pos < 16384 ? end - pos : ::std::size_t{16384}};
+		co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::binary,
+							   session->scrollback.data() + (pos - session->scrollback_base),
+							   want);
+		pos += want;
+	}
+}
+
+fi::io_async_task<> ws_terminal(fi::io_async_observer sched, fi::u8iobuf_socket_file &sock,
+								request const &req, fi::u8string_view query) throws
+{
+	purge_terminal_sessions();
+	auto const requested_id{query_value(query, u8"session")};
+	bool const persistent{valid_terminal_session_id(requested_id)};
+	bool const replay{query_value(query, u8"replay") == fi::u8string_view{u8"1"}};
+	terminal_session *session{persistent ? find_terminal_session(requested_id) : nullptr};
+	if (session != nullptr && session->attached)
+	{
+		// The old socket has not noticed the close yet.  Reject this attempt;
+		// the browser retries shortly, when the session is free again.
+		co_await send_simple(sched, sock, 409, u8"Conflict",
+							 u8"terminal session already attached", req, true);
+		co_return;
+	}
+	if (session == nullptr)
+	{
+		fi::u8string shell;
+#if !defined(_WIN32)
+		auto const *shell_env{::getenv("SHELL")};
+		if (shell_env != nullptr)
+		{
+			shell.assign(fi::u8string_view{reinterpret_cast<char8_t const *>(shell_env),
+										   ::std::strlen(shell_env)});
+		}
+		else
+		{
+			shell.assign(u8"/bin/sh");
+		}
+#endif
+		session = create_terminal_session(requested_id, persistent,
+										  fi::u8string_view{shell.data(), shell.size()});
+	}
+
+	session->attached = true;
+	session->detached_at = 0;
+	bool const registered{session->persistent};
+#if defined(_WIN32)
+	fi::u8win32_io_observer const pty_in{session->proc.input};
+	fi::u8win32_io_observer const pty_out{session->proc.output};
 	fi::basic_win32_family_socket_io_observer<fi::win32_family::native, char8_t> const sock_io{
 		sock.handle.hsocket};
 #else
-	auto const &shell_env{::getenv("SHELL")};
-	fi::u8string shell;
-	if (shell_env != nullptr)
-	{
-		shell.assign(fi::u8string_view{reinterpret_cast<char8_t const *>(shell_env),
-									   ::std::strlen(shell_env)});
-	}
-	else
-	{
-		shell.assign(u8"/bin/sh");
-	}
-
-	spawn_pty(fi::u8string_view{shell.data(), shell.size()}, proc);
-	fi::u8posix_io_observer const pty_in{proc.master.fd};
-	fi::u8posix_io_observer const pty_out{proc.master.fd};
+	fi::u8posix_io_observer const pty_in{session->proc.master.fd};
+	fi::u8posix_io_observer const pty_out{session->proc.master.fd};
 	fi::u8posix_socket_io_observer const sock_io{sock.handle.fd};
 #endif
 
-	// Both directions are driven by the same coroutine.  Every read carries a
-	// short timeout, so neither direction can starve the other and there is no
-	// std::thread anywhere in the pump.
-	bool running{true};
-	ws_parser parser{};
-	::std::byte rbuf[16384];
-	while (running)
+	try
 	{
+		char8_t accept[fi::websocket_accept_key_size];
+		fi::websocket_accept_key(accept, req.ws_key.data(), req.ws_key.size());
+		co_await fi::io::async_print(
+			sched, {}, sock,
+			u8"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+			u8"Sec-WebSocket-Accept: ",
+			fi::u8string_view{accept, fi::websocket_accept_key_size}, u8"\r\n\r\n");
+		co_await fop::async_output_stream_flush(sched, {}, sock);
+
+		co_await send_session_scrollback(sched, sock_io, session, replay);
+
+		bool running{true};
+		ws_parser parser{};
+		::std::byte rbuf[16384];
+		while (running)
+		{
 #if defined(_WIN32)
-		// A ReadFile still pending on a pipe is cancelled by the slice timer,
-		// and a cancelled pipe read throws away the bytes it had already taken.
-		// So never leave a read pending on the console: peek for waiting bytes
-		// and read only when there are some.  The socket read below still paces
-		// the loop, so nothing spins.
-		for (;;)
-		{
-			::std::uint_least32_t available{};
-			if (!::PeekNamedPipe(proc.output, nullptr, 0, nullptr,
-								 __builtin_addressof(available), nullptr))
+			for (;;)
 			{
-				running = false; // the shell closed the console end
-				break;
-			}
-			if (available == 0)
-			{
-				break;
-			}
-			auto const want{static_cast<::std::size_t>(available) < sizeof(rbuf)
-								? static_cast<::std::size_t>(available)
-								: sizeof(rbuf)};
-			auto const n{co_await fop::async_pread_some_bytes(sched, {}, pty_out, rbuf, want, {})};
-			if (n == 0)
-			{
-				running = false;
-				break;
-			}
-			co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::binary, rbuf, n);
-		}
-#else
-		try
-		{
-			auto const n{co_await fop::async_pread_some_bytes(
-				sched, timeout_milliseconds(8), pty_out, rbuf, sizeof(rbuf), {})};
-			if (n == 0)
-			{
-				running = false;
-			}
-			else
-			{
+				::std::uint_least32_t available{};
+				if (!::PeekNamedPipe(session->proc.output, nullptr, 0, nullptr,
+									 __builtin_addressof(available), nullptr))
+				{
+					session->dead = true;
+					running = false;
+					break;
+				}
+				if (available == 0)
+				{
+					break;
+				}
+				auto const want{static_cast<::std::size_t>(available) < sizeof(rbuf)
+									? static_cast<::std::size_t>(available)
+									: sizeof(rbuf)};
+				auto const n{co_await fop::async_pread_some_bytes(sched, {}, pty_out, rbuf,
+																 want, {})};
+				if (n == 0)
+				{
+					session->dead = true;
+					running = false;
+					break;
+				}
+				terminal_scrollback_append(session, rbuf, n);
 				co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::binary,
 									   rbuf, n);
 			}
-		}
-		catch throws(::std::error e)
-		{
-			if (!slice_elapsed(e))
+#else
+			try
 			{
-				running = false;
-			}
-		}
-#endif
-		if (!running)
-		{
-			break;
-		}
-		try
-		{
-			auto const n{co_await fop::async_pread_some_bytes(
-				sched, timeout_milliseconds(8), sock_io, rbuf, sizeof(rbuf), {})};
-			if (n == 0)
-			{
-				running = false;
-			}
-			else
-			{
-				parser.feed(rbuf, n);
-			}
-		}
-		catch throws(::std::error e)
-		{
-			if (!slice_elapsed(e))
-			{
-				running = false;
-			}
-		}
-		if (!running)
-		{
-			break;
-		}
-		ws_frame frame{};
-		while (running && parser.next(frame))
-		{
-			switch (frame.op)
-			{
-			case fi::websocket_opcode::binary:
-				// Binary frames are terminal control, never keystrokes: the
-				// client sends text for input.  [1, colsHi, colsLo, rowsHi,
-				// rowsLo] tells the PTY its real window size so full-screen
-				// programs (vim, less, top) lay themselves out correctly.
-				if (frame.payload.size() == 5 && frame.payload[0] == ::std::byte{1})
+				auto const n{co_await fop::async_pread_some_bytes(
+					sched, timeout_milliseconds(8), pty_out, rbuf, sizeof(rbuf), {})};
+				if (n == 0)
 				{
-					auto const cols{static_cast<::std::uint_least16_t>(
-						(static_cast<unsigned>(frame.payload[1]) << 8) |
-						static_cast<unsigned>(frame.payload[2]))};
-					auto const rows{static_cast<::std::uint_least16_t>(
-						(static_cast<unsigned>(frame.payload[3]) << 8) |
-						static_cast<unsigned>(frame.payload[4]))};
-					resize_pty(proc, cols, rows);
+					session->dead = true;
+					running = false;
+				}
+				else
+				{
+					terminal_scrollback_append(session, rbuf, n);
+					co_await ws_send_frame(sched, sock_io, true,
+										   fi::websocket_opcode::binary, rbuf, n);
+				}
+			}
+			catch throws(::std::error e)
+			{
+				if (!slice_elapsed(e))
+				{
+					session->dead = true;
+					running = false;
+				}
+			}
+#endif
+			if (!running)
+			{
+				break;
+			}
+			try
+			{
+				auto const n{co_await fop::async_pread_some_bytes(
+					sched, timeout_milliseconds(8), sock_io, rbuf, sizeof(rbuf), {})};
+				if (n == 0)
+				{
+					running = false;
+				}
+				else
+				{
+					parser.feed(rbuf, n);
+				}
+			}
+			catch throws(::std::error e)
+			{
+				if (!slice_elapsed(e))
+				{
+					running = false;
+				}
+			}
+			if (!running)
+			{
+				break;
+			}
+			ws_frame frame{};
+			while (running && parser.next(frame))
+			{
+				switch (frame.op)
+				{
+				case fi::websocket_opcode::binary:
+					if (frame.payload.size() == 5 && frame.payload[0] == ::std::byte{1})
+					{
+						auto const cols{static_cast<::std::uint_least16_t>(
+							(static_cast<unsigned>(frame.payload[1]) << 8) |
+							static_cast<unsigned>(frame.payload[2]))};
+						auto const rows{static_cast<::std::uint_least16_t>(
+							(static_cast<unsigned>(frame.payload[3]) << 8) |
+							static_cast<unsigned>(frame.payload[4]))};
+						session->cols = cols;
+						session->rows = rows;
+						resize_pty(session->proc, cols, rows);
+						break;
+					}
+					if (frame.payload.size() == 1 && frame.payload[0] == ::std::byte{3})
+					{
+						// Explicit Close in the UI terminates the shell; a
+						// mere socket loss leaves the session detached.
+						session->dead = true;
+						running = false;
+						break;
+					}
+					[[fallthrough]];
+				case fi::websocket_opcode::text:
+				case fi::websocket_opcode::continuation:
+					if (!frame.payload.is_empty())
+					{
+						try
+						{
+							co_await async_write_all(sched, pty_in, frame.payload.data(),
+													 frame.payload.size());
+						}
+						catch throws(::std::error e)
+						{
+							session->dead = true;
+							running = false;
+						}
+					}
+					break;
+				case fi::websocket_opcode::ping:
+					co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::pong,
+										   frame.payload.data(), frame.payload.size());
+					break;
+				case fi::websocket_opcode::close:
+					running = false;
+					break;
+				default:
 					break;
 				}
-				[[fallthrough]];
-			case fi::websocket_opcode::text:
-			case fi::websocket_opcode::continuation:
-				if (!frame.payload.is_empty())
-				{
-					co_await async_write_all(sched, pty_in, frame.payload.data(),
-											 frame.payload.size());
-				}
-				break;
-			case fi::websocket_opcode::ping:
-				co_await ws_send_frame(sched, sock_io, true, fi::websocket_opcode::pong,
-									   frame.payload.data(), frame.payload.size());
-				break;
-			case fi::websocket_opcode::close:
-				running = false;
-				break;
-			default:
-				break;
 			}
 		}
 	}
+	catch throws(::std::error e)
+	{
+		// A dead socket is not a dead shell: fall through to the detach path.
+	}
 
-	close_pty(proc);
+	if (session->dead)
+	{
+		if (registered)
+		{
+			unregister_terminal_session(session);
+		}
+		destroy_terminal_session(session);
+	}
+	else if (session->persistent)
+	{
+		session->attached = false;
+		session->detach_pos = session->scrollback_base + session->scrollback.size();
+		session->detached_at = static_cast<::std::int_least64_t>(::fast_io::posix_clock_gettime(::fast_io::posix_clock_id::realtime).tv_sec);
+	}
+	else
+	{
+		destroy_terminal_session(session);
+	}
 }
 
 /* ----------------------------- HTTP -------------------------------- */
@@ -1482,7 +1741,8 @@ fi::io_async_task<> session(fi::io_async_observer sched, fi::u8iobuf_socket_file
 							 req.ws_version == fi::u8string_view{u8"13"}};
 			if (is_ws)
 			{
-				co_await ws_terminal(sched, sock, req);
+				co_await ws_terminal(sched, sock, req,
+									 fi::u8string_view{parts.query.data(), parts.query.size()});
 				co_return;
 			}
 			if (req.method == fi::u8string_view{u8"OPTIONS"})
