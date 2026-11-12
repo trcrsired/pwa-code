@@ -542,6 +542,65 @@ body.sidebar-resizing { user-select: none; cursor: col-resize; }
 .file-menu button:disabled { color: var(--muted); opacity: 0.55; cursor: default; }
 .file-menu .menu-icon { width: 15px; text-align: center; color: var(--accent); }
 .file-menu .menu-sep { height: 1px; margin: 4px 3px; background: var(--border); }
+.build-menu button { align-items: flex-start; }
+.build-menu .menu-icon { flex: 0 0 15px; }
+
+.build-pick {
+  padding: 5px 5px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+}
+.macro-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.macro-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.macro-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.macro-head .macro-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+}
+.macro-head .icon-btn { padding: 4px 7px; font-size: 13px; }
+.macro-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.macro-field input,
+.macro-field textarea {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 5px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.macro-field textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+.macro-empty { margin: 0; }
 
 .props-list {
   margin: 0;

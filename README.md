@@ -23,12 +23,13 @@ shipped as an installable PWA, plus an async native coding server.
   depth colours, Notepad++-style word completion (records words from the
   current file and shows a caret hint list accepted with Tab/Enter),
   Notepad++-style build macros (`Ctrl+Shift+B` saves the current file and runs
-  a configurable command with `$(FULL_CURRENT_PATH)`, `$(CURRENT_DIRECTORY)`,
-  `$(FILE_NAME)`, `$(NAME_PART)` and `$(EXT_PART)` placeholders in the
-  server-backed terminal), find/replace, find/replace across a folder with
-  grouped VSCode-style results and replace one/all, go to line, hex editor,
-  extra-key row (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's
-  on-screen keyboard.
+  the macro attached to its file extension; the top-bar ▾ picker chooses any
+  configured macro, and a configurable command supports
+  `$(FULL_CURRENT_PATH)`, `$(CURRENT_DIRECTORY)`, `$(FILE_NAME)`,
+  `$(NAME_PART)` and `$(EXT_PART)` placeholders in the server-backed terminal),
+  find/replace, find/replace across a folder with grouped VSCode-style results
+  and replace one/all, go to line, hex editor, extra-key row
+  (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's on-screen keyboard.
 - **Themes** — full-black dark or full-white light; the default follows the
   OS colour scheme and repaints live when it changes.
 - **Terminal** — native async PTY over WebSocket.  The POSIX shell starts in

@@ -48,6 +48,7 @@
       <button id="saveBtn" class="icon-btn primary" title="Save (Ctrl+S)" aria-label="Save"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h8l3 3v8h-11z"/><path d="M5 2.5v3.5h5V2.5"/><path d="M5 13.5v-4h6v4"/></svg></button>
       <button id="saveAsBtn" class="tool-btn" title="Save as">Save as</button>
       <button id="buildBtn" class="icon-btn" title="Build / run current file (Ctrl+Shift+B)" aria-label="Build and run current file"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.2v9.6l8-4.8z"/></svg></button>
+      <button id="buildPickBtn" class="icon-btn build-pick" title="Choose build macro" aria-label="Choose build macro" aria-haspopup="menu" aria-expanded="false" hidden>▾</button>
       <button id="hexBtn" class="tool-btn" title="Toggle hex editor">Hex</button>
       <button id="termBtn" class="icon-btn" title="Toggle terminal" aria-label="Toggle terminal"><svg class="btn-ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 6l2 2-2 2"/><path d="M8.5 10h3"/></svg></button>
       <button id="keyboardBtn" class="tool-btn" title="Extra keys and on-screen keyboard">⌨</button>
@@ -286,13 +287,10 @@
         </label>
       </section>
       <section>
-        <h3>Build macro</h3>
-        <label class="row stack">Run command
-          <textarea id="setBuildCommand" rows="3" spellcheck="false"
-            autocapitalize="off" autocomplete="off" autocorrect="off"
-            placeholder='cd "$(CURRENT_DIRECTORY)" &amp;&amp; c++ "$(FILE_NAME)" &amp;&amp; ./a.out'></textarea>
-        </label>
-        <p class="mount-help">Notepad++-style placeholders: <code>$(FULL_CURRENT_PATH)</code>, <code>$(CURRENT_DIRECTORY)</code>, <code>$(FILE_NAME)</code>, <code>$(NAME_PART)</code>, <code>$(EXT_PART)</code>. The current file is saved first, then the command runs in a terminal connected to the active remote mount's pwa-code server (opened automatically).</p>
+        <h3>Build macros</h3>
+        <div id="buildMacroList" class="macro-list"></div>
+        <button id="addBuildMacro" class="tool-btn" type="button">+ Macro</button>
+        <p class="mount-help">Each macro can target file extensions (for example <code>cpp cxx h</code>); leave extensions blank to match any file. The first matching macro runs from the play button or <code>Ctrl+Shift+B</code>; use the ▾ picker to choose another. All placeholders are Notepad++-style: <code>$(FULL_CURRENT_PATH)</code>, <code>$(CURRENT_DIRECTORY)</code>, <code>$(FILE_NAME)</code>, <code>$(NAME_PART)</code>, <code>$(EXT_PART)</code>. The current file is saved first, then the command runs in a terminal connected to the active remote mount's pwa-code server (opened automatically).</p>
       </section>
       <section>
         <h3>Terminal &amp; volumes</h3>
@@ -321,6 +319,7 @@
 <!-- Explorer row actions.  The menu is positioned next to the ⋮ button that
      opened it, like the overflow menu in pwa-player. -->
 <div id="fileMenu" class="file-menu" role="menu" aria-label="File actions" hidden></div>
+<div id="buildMenu" class="file-menu build-menu" role="menu" aria-label="Build macros" hidden></div>
 
 <div id="propsModal" class="modal" hidden>
   <div class="modal-card narrow">

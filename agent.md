@@ -79,15 +79,20 @@ filesystem header is opt-in and is not linked into it.
   move, Tab/Enter accept, Esc dismisses, clicking/tapping selects, and
   `Ctrl+Space` forces the list.  It is enabled by default and configurable in
   Settings; the word list is rebuilt off the typing path.
-- Build macros follow Notepad++'s Run command.  `Ctrl+Shift+B` or the top-bar
-  play button saves the active file, expands `$(FULL_CURRENT_PATH)`,
-  `$(CURRENT_DIRECTORY)`, `$(FILE_NAME)`, `$(NAME_PART)` and `$(EXT_PART)`,
-  then sends the command to the active server-backed terminal (opening it if
-  needed).  The default command compiles and runs a C++ file.  Internal,
-  external and read-only HTTP volumes are rejected because they have no PTY
-  workspace; the terminal is targeted at the active tab's remote mount, and a
-  mismatched existing terminal gets a fresh shell rather than receiving the
-  command on the wrong machine.
+- Build macros follow Notepad++'s Run command.  Settings holds a named list;
+  each entry has a space/comma-separated extension set (`.cpp`, `*.h`, `cxx`,
+  etc.) and an empty extension set means "any file".  `Ctrl+Shift+B` or the
+  top-bar play button saves the active file, picks the first macro whose
+  extension set matches (extension-specific entries beat catch-alls), expands
+  `$(FULL_CURRENT_PATH)`, `$(CURRENT_DIRECTORY)`, `$(FILE_NAME)`,
+  `$(NAME_PART)` and `$(EXT_PART)`, then sends the command to the active
+  server-backed terminal (opening it if needed).  The ▾ picker runs a
+  different macro once without changing the mappings.  The default C++ macro
+  compiles and runs C/C++ files.  Internal, external and read-only HTTP
+  volumes are rejected because they have no PTY workspace; the terminal is
+  targeted at the active tab's remote mount, and a mismatched existing
+  terminal gets a fresh shell rather than receiving the command on the wrong
+  machine.
 - Find/replace is literal.  It works in the open file or, from the explorer's
   folder menu (or `Ctrl+Shift+F`), across that folder with VSCode-style results
   grouped by file.  Replace one/all edits open buffers in memory and rewrites
@@ -229,7 +234,7 @@ Run locally:
 6. Hex panel renders and patches bytes; save bytes.
 7. Terminal connects and echoes `FINAL_OK`.  On a remote server mount, the
    play button / `Ctrl+Shift+B` saves the file, opens the terminal, and runs the
-   configured build command with every placeholder expanded.
+   macro attached to the file extension; the ▾ picker runs any other macro.
 8. Remote volume with a dead base URL shows a clean toast, not an unhandled
    rejection.
 9. 390×844 layout has no horizontal overflow; the sidebar fills the space

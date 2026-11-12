@@ -13,6 +13,7 @@ const $ = (id) => document.getElementById(id);
 const NO_MATCH = 0xFFFFFFFF;
 let fileSearchTimer = 0;
 let fileSearchEnginePromise = null;
+let macroSeq = 0;
 
 const DEFAULT_SETTINGS = {
   theme: "system",
@@ -29,11 +30,19 @@ const DEFAULT_SETTINGS = {
   bracketColor: true,
   wordCompletion: true,
   wordCompletionMin: 1,
-  // Notepad++-style run command.  The default compiles and runs a C++ file;
-  // every $(...) placeholder is expanded from the active document first.
-  buildCommand:
-    'cd "$(CURRENT_DIRECTORY)" && c++ -std=c++20 -O2 -o "$(NAME_PART)" ' +
-    '"$(FILE_NAME)" && ./"$(NAME_PART)"',
+  // Notepad++-style run commands.  Each macro can be attached to a set of
+  // file extensions; the first matching entry in this list is the one the
+  // play button and Ctrl+Shift+B run.
+  buildMacros: [
+    {
+      id: "macro-cpp",
+      name: "C++",
+      exts: "cpp cc cxx c++ h hpp hh hxx",
+      command:
+        'cd "$(CURRENT_DIRECTORY)" && c++ -std=c++20 -O2 -o "$(NAME_PART)" ' +
+        '"$(FILE_NAME)" && ./"$(NAME_PART)"',
+    },
+  ],
   conflictDisplay: true,
   restoreSession: true,
   encoding: 0,
@@ -169,11 +178,54 @@ function saveSettings() {
   }
 }
 
+function makeMacroId() {
+  macroSeq++;
+  return `macro-${Date.now().toString(36)}-${macroSeq}`;
+}
+
+// Extensions are stored as one space-separated list.  Accept the forms users
+// naturally type: "cpp, cxx", ".h", "*.hpp" and mixed case.
+function normalizeMacroExts(value) {
+  const out = [];
+  const seen = new Set();
+  for (const token of String(value || "").split(/[\s,;]+/)) {
+    let ext = token.trim().toLowerCase();
+    if (!ext) continue;
+    if (ext.startsWith("*.")) ext = ext.slice(2);
+    else if (ext.startsWith(".")) ext = ext.slice(1);
+    if (!ext || seen.has(ext)) continue;
+    seen.add(ext);
+    out.push(ext);
+  }
+  return out.join(" ");
+}
+
+function normalizeBuildMacro(raw, index = 0) {
+  if (!raw || typeof raw !== "object") return null;
+  const name = String(raw.name || "").trim() || `Macro ${index + 1}`;
+  return {
+    id: String(raw.id || makeMacroId()),
+    name,
+    exts: normalizeMacroExts(raw.exts ?? raw.extensions ?? ""),
+    command: String(raw.command || ""),
+  };
+}
+
+function normalizeBuildMacroList(list) {
+  if (!Array.isArray(list)) return defaultBuildMacros();
+  return list.map((macro, index) => normalizeBuildMacro(macro, index)).filter(Boolean);
+}
+
+function defaultBuildMacros() {
+  return DEFAULT_SETTINGS.buildMacros.map((macro, index) => normalizeBuildMacro(macro, index));
+}
+
 function readSettings() {
+  let saved = null;
   try {
     const raw = localStorage.getItem("pwacode.settings.v1");
     if (raw) {
-      const saved = JSON.parse(raw);
+      saved = JSON.parse(raw);
       state.settings = { ...DEFAULT_SETTINGS, ...saved };
       // Settings can outlive a build with a smaller zoom range; keep the
       // loaded values inside what the current UI can render.
@@ -194,7 +246,22 @@ function readSettings() {
     }
   } catch {
     state.settings = { ...DEFAULT_SETTINGS };
+    saved = null;
   }
+  // Migrate the single-macro setting from the first build-macro release.
+  if (saved && !Array.isArray(saved.buildMacros) &&
+      typeof saved.buildCommand === "string" && saved.buildCommand.trim()) {
+    state.settings.buildMacros = [{
+      id: makeMacroId(),
+      name: "Build",
+      exts: "",
+      command: saved.buildCommand,
+    }];
+  }
+  state.settings.buildMacros = normalizeBuildMacroList(
+    Array.isArray(state.settings.buildMacros) ? state.settings.buildMacros : defaultBuildMacros(),
+  );
+  delete state.settings.buildCommand;
 }
 
 const SYSTEM_THEME_QUERY = typeof window !== "undefined" && window.matchMedia
@@ -271,6 +338,7 @@ function applySettings() {
   updateHighlight();
   if (state.hexMode) renderHex();
   if (activeTermInst()) resizeTerminal();
+  refreshBuildMacroUi();
 }
 
 /* ------------------------------------------------------------------ zoom */
@@ -559,6 +627,7 @@ function updateDocPath() {
   input.title = state.path
     ? `Current file: ${state.path}${large ? " (read-only view)" : ""} — Enter to open another file, Esc to cancel`
     : "No file open — type a path and press Enter";
+  refreshBuildMacroUi();
 }
 
 function renderTabs() {
@@ -2118,6 +2187,60 @@ function openFileMenu(anchor, entry) {
   menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
 }
 
+function closeBuildMenu() {
+  const menu = $("buildMenu");
+  if (!menu) return;
+  menu.hidden = true;
+  menu.textContent = "";
+  $("buildPickBtn")?.setAttribute("aria-expanded", "false");
+}
+
+function openBuildMenu(anchor) {
+  closeFileMenu();
+  closeBuildMenu();
+  const menu = $("buildMenu");
+  const macros = state.settings.buildMacros || [];
+  if (!macros.length) {
+    menuButton(menu, "·", "No build macros configured", () => {}, true);
+  } else {
+    const matched = selectBuildMacro();
+    for (const macro of macros) {
+      const exts = buildMacroExtensions(macro);
+      const suffix = exts.length ? exts.join(", ") : "any file";
+      menuButton(
+        menu,
+        macro === matched ? "▶" : "·",
+        `${macro.name} — ${suffix}`,
+        () => {
+          closeBuildMenu();
+          runBuildMacro(macro);
+        },
+      );
+    }
+  }
+  menuSeparator(menu);
+  menuButton(menu, "⚙", "Manage build macros…", () => {
+    closeBuildMenu();
+    populateSettingsForm();
+    $("settingsModal").hidden = false;
+  });
+  menu.hidden = false;
+  anchor.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  let left = rect.right - box.width;
+  let top = rect.bottom + 4;
+  if (left < 8) left = 8;
+  if (left + box.width > window.innerWidth - 8) {
+    left = window.innerWidth - box.width - 8;
+  }
+  if (top + box.height > window.innerHeight - 8) top = rect.top - box.height - 4;
+  if (top < 8) top = 8;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+}
+
 function setClipboard(entry, mode) {
   state.clipboard = {
     volume: state.volumes.ref(),
@@ -2425,7 +2548,54 @@ function buildMacroVolume() {
   return null;
 }
 
-async function runBuildMacro() {
+function activeFileInfo(pathOverride = "") {
+  const tab = activeTab();
+  const path = pathOverride || state.path || tab?.langPath || tab?.path || "";
+  const file = baseName(path);
+  const dot = file.lastIndexOf(".");
+  return {
+    path,
+    file,
+    ext: dot > 0 ? file.slice(dot + 1).toLowerCase() : "",
+  };
+}
+
+function buildMacroExtensions(macro) {
+  return String(macro?.exts || "").split(/\s+/).filter(Boolean);
+}
+
+function macroMatchesExtension(macro, ext) {
+  const exts = buildMacroExtensions(macro);
+  if (!exts.length) return true;
+  return !!ext && exts.includes(ext);
+}
+
+// Extension-specific entries win over catch-all entries regardless of list
+// order; among equals the order in Settings is the tie-breaker (use the
+// up/down buttons to choose which macro a one-press build should run).
+function selectBuildMacro(path = "") {
+  const macros = state.settings.buildMacros || [];
+  const ext = activeFileInfo(path).ext;
+  const specific = macros.find((macro) =>
+    buildMacroExtensions(macro).length && macroMatchesExtension(macro, ext));
+  if (specific) return specific;
+  return macros.find((macro) => buildMacroExtensions(macro).length === 0) || null;
+}
+
+function refreshBuildMacroUi() {
+  const macros = state.settings.buildMacros || [];
+  const picker = $("buildPickBtn");
+  if (picker) picker.hidden = macros.length <= 1;
+  const matched = selectBuildMacro();
+  const button = $("buildBtn");
+  if (button) {
+    button.title = matched
+      ? `Build / run with "${matched.name}" (Ctrl+Shift+B)`
+      : "Build / run current file (Ctrl+Shift+B)";
+  }
+}
+
+async function runBuildMacro(macro = null) {
   if (!state.engineReady) return;
   if (state.largeMode) {
     toast("Large files open in the read-only partial view; use the native CLI.", true);
@@ -2439,9 +2609,17 @@ async function runBuildMacro() {
     await saveDocument(false, true);
     if (!state.path) return;
   }
-  const template = String(state.settings.buildCommand || "").trim();
+  const chosen = macro || selectBuildMacro(state.path);
+  if (!chosen) {
+    const ext = activeFileInfo(state.path).ext;
+    toast(ext
+      ? `No build macro for .${ext}; add or attach one in Settings.`
+      : "No build macro matches this file; add one in Settings.", true);
+    return;
+  }
+  const template = String(chosen.command || "").trim();
   if (!template) {
-    toast("Set a build command in Settings.", true);
+    toast(`Build macro "${chosen.name}" has no command.`, true);
     return;
   }
   // Compile what is on screen, not the previous save.  A failed save leaves
@@ -2465,7 +2643,7 @@ async function runBuildMacro() {
     inst = newTerminalInstance();
   }
   sendTerminalBytes(new TextEncoder().encode(`${command}\r`));
-  toast(`build: ${baseName(state.path)}`);
+  toast(`build ${chosen.name}: ${baseName(state.path)}`);
 }
 
 /* ------------------------------------------------------------------ close */
@@ -4744,6 +4922,131 @@ function endStatusEdit(commit) {
 
 /* ---------------------------------------------------------------- settings */
 
+function macroField(label, className, value, multiline) {
+  const wrap = document.createElement("label");
+  wrap.className = "macro-field";
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  const input = document.createElement(multiline ? "textarea" : "input");
+  input.className = className;
+  if (multiline) {
+    input.rows = 3;
+    input.spellcheck = false;
+    input.value = value;
+  } else {
+    input.type = "text";
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    input.value = value;
+  }
+  wrap.append(caption, input);
+  return wrap;
+}
+
+function appendBuildMacroCard(macro, index) {
+  const list = $("buildMacroList");
+  const card = document.createElement("div");
+  card.className = "macro-card";
+  card.dataset.macroId = macro.id;
+
+  const head = document.createElement("div");
+  head.className = "macro-head";
+  const name = document.createElement("input");
+  name.type = "text";
+  name.className = "macro-name";
+  name.value = macro.name || `Macro ${index + 1}`;
+  name.placeholder = "Macro name";
+  name.setAttribute("aria-label", "Build macro name");
+  const up = document.createElement("button");
+  up.type = "button";
+  up.className = "icon-btn macro-up";
+  up.textContent = "↑";
+  up.title = "Move earlier (wins ties)";
+  up.setAttribute("aria-label", "Move macro up");
+  const down = document.createElement("button");
+  down.type = "button";
+  down.className = "icon-btn macro-down";
+  down.textContent = "↓";
+  down.title = "Move later";
+  down.setAttribute("aria-label", "Move macro down");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-btn macro-del";
+  remove.textContent = "×";
+  remove.title = "Remove macro";
+  remove.setAttribute("aria-label", "Remove macro");
+  head.append(name, up, down, remove);
+
+  const extField = macroField("File extensions", "macro-exts", macro.exts || "");
+  extField.querySelector("input").placeholder = "cpp cxx h — blank matches any file";
+  const commandField = macroField("Command", "macro-command", macro.command || "", true);
+  const command = commandField.querySelector("textarea");
+  command.placeholder =
+    'cd "$(CURRENT_DIRECTORY)" && c++ "$(FILE_NAME)" -o "$(NAME_PART)" && ./"$(NAME_PART)"';
+
+  up.addEventListener("click", () => {
+    const previous = card.previousElementSibling;
+    if (previous?.classList.contains("macro-card")) {
+      list.insertBefore(card, previous);
+    }
+  });
+  down.addEventListener("click", () => {
+    const next = card.nextElementSibling;
+    if (next?.classList.contains("macro-card")) {
+      list.insertBefore(next, card);
+    }
+  });
+  remove.addEventListener("click", () => {
+    card.remove();
+    updateBuildMacroEmptyHint();
+  });
+
+  card.append(head, extField, commandField);
+  list.appendChild(card);
+  return card;
+}
+
+function updateBuildMacroEmptyHint() {
+  const list = $("buildMacroList");
+  if (!list) return;
+  const empty = list.querySelector(".macro-empty");
+  const cards = list.querySelectorAll(".macro-card");
+  if (!cards.length && !empty) {
+    const hint = document.createElement("p");
+    hint.className = "macro-empty mount-help";
+    hint.textContent = "No build macros. Add one to enable the play button.";
+    list.appendChild(hint);
+  } else if (cards.length && empty) {
+    empty.remove();
+  }
+}
+
+function renderBuildMacroRows() {
+  const list = $("buildMacroList");
+  if (!list) return;
+  list.textContent = "";
+  const macros = state.settings.buildMacros || [];
+  macros.forEach((macro, index) => appendBuildMacroCard(macro, index));
+  updateBuildMacroEmptyHint();
+}
+
+function collectBuildMacrosFromForm() {
+  const list = $("buildMacroList");
+  if (!list) return state.settings.buildMacros || [];
+  const cards = [...list.querySelectorAll(".macro-card")];
+  const out = [];
+  cards.forEach((card, index) => {
+    const macro = normalizeBuildMacro({
+      id: card.dataset.macroId,
+      name: card.querySelector(".macro-name")?.value || "",
+      exts: card.querySelector(".macro-exts")?.value || "",
+      command: card.querySelector(".macro-command")?.value || "",
+    }, index);
+    if (macro) out.push(macro);
+  });
+  return out;
+}
+
 function populateSettingsForm() {
   const s = state.settings;
   $("setTheme").value = s.theme;
@@ -4762,7 +5065,7 @@ function populateSettingsForm() {
   $("setAutoSave").checked = s.autoSave;
   $("setWordCompletion").checked = s.wordCompletion !== false;
   $("setWordCompletionMin").value = String(Number(s.wordCompletionMin) || 1);
-  $("setBuildCommand").value = s.buildCommand || "";
+  renderBuildMacroRows();
   $("setBracketColor").checked = s.bracketColor;
   $("setConflictDisplay").checked = s.conflictDisplay !== false;
   $("setRestoreSession").checked = s.restoreSession !== false;
@@ -4800,7 +5103,7 @@ async function applySettingsForm() {
   s.autoSave = $("setAutoSave").checked;
   s.wordCompletion = $("setWordCompletion").checked;
   s.wordCompletionMin = Math.max(1, Math.min(8, Number($("setWordCompletionMin").value) || 1));
-  s.buildCommand = $("setBuildCommand").value;
+  s.buildMacros = collectBuildMacrosFromForm();
   s.bracketColor = $("setBracketColor").checked;
   s.conflictDisplay = $("setConflictDisplay").checked;
   s.restoreSession = $("setRestoreSession").checked;
@@ -5637,22 +5940,49 @@ function bindEvents() {
     if (event.target.closest("#fileMenu")) return;
     closeFileMenu();
   });
+  document.addEventListener("pointerdown", (event) => {
+    if ($("buildMenu").hidden) return;
+    if (event.target.closest("#buildMenu") || event.target.closest("#buildPickBtn")) return;
+    closeBuildMenu();
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !$("fileMenu").hidden) {
       event.preventDefault();
       closeFileMenu();
+    } else if (event.key === "Escape" && !$("buildMenu").hidden) {
+      event.preventDefault();
+      closeBuildMenu();
     } else if (event.key === "Escape" && !$("conflictPanel").hidden) {
       event.preventDefault();
       $("conflictPanel").hidden = true;
     }
   });
   $("fileList").addEventListener("scroll", closeFileMenu, { passive: true });
-  window.addEventListener("resize", closeFileMenu);
+  window.addEventListener("resize", () => {
+    closeFileMenu();
+    closeBuildMenu();
+  });
   $("undoBtn").addEventListener("click", undo);
   $("redoBtn").addEventListener("click", redo);
   $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
   $("buildBtn").addEventListener("click", () => runBuildMacro());
+  $("buildPickBtn").addEventListener("click", () => {
+    if ($("buildMenu").hidden) openBuildMenu($("buildPickBtn"));
+    else closeBuildMenu();
+  });
+  $("addBuildMacro").addEventListener("click", () => {
+    const list = $("buildMacroList");
+    const card = appendBuildMacroCard({
+      id: makeMacroId(),
+      name: `Macro ${list.querySelectorAll(".macro-card").length + 1}`,
+      exts: "",
+      command: "",
+    }, list.querySelectorAll(".macro-card").length);
+    updateBuildMacroEmptyHint();
+    card.querySelector(".macro-name")?.focus({ preventScroll: true });
+    card.scrollIntoView({ block: "nearest" });
+  });
   $("findBtn").addEventListener("click", () => openFind(false));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
   $("hexClose").addEventListener("click", closeHex);
@@ -6085,7 +6415,7 @@ function bindEvents() {
     $("settingsModal").hidden = true;
   });
   $("settingsReset").addEventListener("click", () => {
-    state.settings = { ...DEFAULT_SETTINGS };
+    state.settings = { ...DEFAULT_SETTINGS, buildMacros: defaultBuildMacros() };
     saveSettings();
     populateSettingsForm();
     applySettings();
