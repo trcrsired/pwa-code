@@ -2794,15 +2794,14 @@ function connectTerminal(inst = activeTermInst()) {
       if (inst === activeTermInst()) updateTerminalStatus(inst);
       scheduleTerminalRetry(inst);
     };
+    // A socket failure is routine whenever the app is backgrounded or the
+    // network blips, and the reconnect loop handles it.  Report it in the
+    // terminal's status line only; a toast here fires on every app switch and
+    // buries the pane until the reconnect succeeds.
     ws.onerror = () => {
       if (inst.ws !== ws) return;
       inst.status = "error";
-      if (inst === activeTermInst()) {
-        updateTerminalStatus(inst);
-        if (inst.retry === 0) {
-          toast("Terminal WebSocket failed. Start the native server or set a URL in Settings.", true);
-        }
-      }
+      if (inst === activeTermInst()) updateTerminalStatus(inst);
     };
     ws.onmessage = (event) => {
       if (inst.ws !== ws) return;
@@ -3061,11 +3060,11 @@ function sendTerminalBytes(bytes) {
     return;
   }
   // Queue keystrokes typed while the socket is reconnecting from a suspend;
-  // onopen replays them after sending the PTY size.
+  // onopen replays them after sending the PTY size.  The status line already
+  // says "reconnecting…", so do not raise a toast for every key.
   inst.queue.push(bytes);
   if (inst.queue.length > 64) inst.queue.shift();
   ensureTerminalConnection(inst);
-  toast("Terminal reconnecting…", true);
 }
 
 /* ---------------------------------------------------- terminal clipboard */

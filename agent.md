@@ -107,6 +107,11 @@ filesystem header is opt-in and is not linked into it.
   too, so only shell rows remain.  The pane also ends above the soft-key row
   and the OS keyboard, and the PTY is re-measured when they appear or go away.
   Focus returns to the shell, and hiding/closing the pane clears the state.
+- A terminal socket that drops on an app switch, a network blip, or a
+  background suspend is routine: the status text reports `reconnecting…` and
+  the retry loop reopens it.  No toast is raised for connection failures or for
+  keystrokes queued while reconnecting, so switching apps never buries the pane
+  in warnings.
 
 ## 3. Layout
 
