@@ -99,6 +99,10 @@ filesystem header is opt-in and is not linked into it.
   on the terminal refocus it.  `visualViewport` keeps the extra row above the
   OS keyboard rather than behind it; `--softkb-h` carries its measured height
   so the app padding and a full-screen terminal shrink by exactly that much.
+  Ctrl/Alt are sticky flags: a later soft key or a typed character folds them
+  into the PTY bytes, so soft Ctrl+C is SIGINT (or copies a live selection)
+  and Ctrl/Alt+arrows use the xterm modified-CSI form.  Real keyboards still
+  report `ctrlKey`/`altKey` directly.
 - The terminal toolbar's full-screen button (an SVG expand/collapse icon, so
   it renders on every desktop font stack) toggles a full-screen pane:
   `body.term-max` hides the top bar, document tabs, status bar and sidebar and

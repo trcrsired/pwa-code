@@ -3041,15 +3041,60 @@ function toggleTerminal(show) {
 function sendTerminalKey(key, mods) {
   const inst = activeTermInst();
   if (!inst) return;
-  let bytes = keyToBytes({
+  const bytes = keyToBytes({
     key,
     ctrlKey: mods.ctrl,
     altKey: mods.alt,
     metaKey: false,
   });
-  if (key.length === 1 && mods.ctrl) bytes = String.fromCharCode(key.toUpperCase().charCodeAt(0) - 64);
   if (!bytes) return;
   sendTerminalBytes(bytes);
+}
+
+// The extra key row's Ctrl/Alt are sticky flags in `state.softMods`; a soft
+// keyboard's printable key arrives through `input` (or a keydown with no
+// ctrlKey/altKey), so the modifier has to be folded in here rather than read
+// from the event.  Apply it to the first character and fall back to plain text
+// for the rest, then consume it like a real chord.
+function sendTerminalTypedText(text) {
+  const mods = state.softMods;
+  if (!mods.ctrl && !mods.alt) {
+    sendTerminalBytes(text.replace(/\r?\n/g, "\r"));
+    return;
+  }
+  let out = "";
+  let used = false;
+  for (const char of text.replace(/\r?\n/g, "\r")) {
+    if (!used) {
+      out += keyToBytes({
+        key: char,
+        ctrlKey: !!mods.ctrl,
+        altKey: !!mods.alt,
+        metaKey: false,
+      });
+      used = true;
+    } else {
+      out += char;
+    }
+  }
+  if (out) sendTerminalBytes(out);
+  clearSoftModifiers();
+}
+
+function clearSoftModifiers() {
+  state.softMods.ctrl = false;
+  state.softMods.alt = false;
+  updateSoftMods();
+}
+
+// A sticky Ctrl+C follows the same rule as a physical one: a live terminal
+// selection is copied, otherwise it reaches the shell as SIGINT.
+function softCtrlCCopiesSelection() {
+  if (!state.softMods.ctrl) return false;
+  if (!terminalSelectionText()) return false;
+  copyTerminalSelection();
+  clearSoftModifiers();
+  return true;
 }
 
 function sendTerminalBytes(bytes) {
@@ -5359,6 +5404,15 @@ function bindEvents() {
     // Printable keys are delivered through the input event, which is the only
     // path that works with soft keyboards and IMEs that report "Unidentified".
     if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      // ...but some soft keyboards do send a keydown.  When the on-screen
+      // Ctrl/Alt is latched, turn this character into the chord now; otherwise
+      // the terminal's bubbling keydown would send the bare letter.
+      if (state.softMods.ctrl || state.softMods.alt) {
+        event.preventDefault();
+        if (!(event.key.toLowerCase() === "c" && softCtrlCCopiesSelection())) {
+          sendTerminalTypedText(event.key);
+        }
+      }
       return;
     }
     const bytes = keyToBytes(event);
@@ -5372,9 +5426,12 @@ function bindEvents() {
     const text = termInput.value;
     if (!text) return;
     termInput.value = "";
+    // Soft-keyboard chords carry no ctrlKey/altKey on the event, so the
+    // latched on-screen modifiers are applied to the typed character.
+    if (text.toLowerCase() === "c" && softCtrlCCopiesSelection()) return;
     // A soft-keyboard Enter arrives as a newline rather than a keydown; the
     // PTY expects CR.
-    sendTerminalBytes(text.replace(/\r?\n/g, "\r"));
+    sendTerminalTypedText(text);
   });
   termInput.addEventListener("paste", (event) => {
     const text = event.clipboardData?.getData("text") || "";

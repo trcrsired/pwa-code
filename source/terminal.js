@@ -585,10 +585,28 @@ function escapeHtml(text) {
 
 // Keyboard to PTY byte mapping.  `ctrl` is a boolean for the soft keyboard.
 export function keyToBytes(event) {
-  const { key, ctrlKey, altKey, metaKey } = event;
+  const { key, ctrlKey, altKey, metaKey, shiftKey } = event;
   if (ctrlKey && key.length === 1) {
     const code = key.toUpperCase().charCodeAt(0);
-    if (code >= 64 && code <= 95) return String.fromCharCode(code - 64);
+    if (code >= 64 && code <= 95) {
+      const control = String.fromCharCode(code - 64);
+      return altKey ? `\x1b${control}` : control;
+    }
+  }
+  // Modified navigation keys use the xterm CSI form (1 + shift + 2*alt +
+  // 4*ctrl) instead of the plain sequence, so Ctrl+Left/Tab etc. reach
+  // readline and full-screen programs as real chords.
+  const modifier = (shiftKey ? 1 : 0) + (altKey ? 2 : 0) + (ctrlKey ? 4 : 0);
+  if (modifier) {
+    const final = {
+      ArrowUp: "A", ArrowDown: "B", ArrowRight: "C", ArrowLeft: "D",
+      Home: "H", End: "F",
+    }[key];
+    if (final) return `\x1b[1;${modifier + 1}${final}`;
+    const tilde = {
+      Insert: 2, Delete: 3, PageUp: 5, PageDown: 6,
+    }[key];
+    if (tilde) return `\x1b[${tilde};${modifier + 1}~`;
   }
   switch (key) {
     case "Enter": return "\r";
