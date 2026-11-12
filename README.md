@@ -20,7 +20,9 @@ shipped as an installable PWA, plus an async native coding server.
   UTF-EBCDIC, BOM detection.  Internally always UTF-8 + LF; save re-encodes with
   the source policy.
 - **Editing** — Notepad++ keyword sets (36 languages), VSCode-style bracket
-  depth colours, find/replace, find/replace across a folder with grouped
+  depth colours, Notepad++-style word completion (records words from the
+  current file and shows a caret hint list accepted with Tab/Enter),
+  find/replace, find/replace across a folder with grouped
   VSCode-style results and replace one/all, go to line, hex editor, extra-key
   row (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's on-screen
   keyboard.

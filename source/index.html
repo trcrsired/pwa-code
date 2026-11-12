@@ -91,6 +91,7 @@
           <div id="highlight" class="highlight" aria-hidden="true"></div>
           <textarea id="editor" class="editor" spellcheck="false" autocapitalize="off"
             autocomplete="off" autocorrect="off" wrap="off" aria-label="Code editor"></textarea>
+          <div id="completion" class="completion" role="listbox" aria-label="Word completion" hidden></div>
           <div id="largeScroll" class="large-scroll" hidden aria-label="Large file view">
             <div id="largeSpacer" class="large-spacer"></div>
           </div>
@@ -270,6 +271,8 @@
           <select id="setIndent"><option value="-1">Auto (detect per file)</option><option value="0">2 spaces</option><option value="1">Tab</option></select>
         </label>
         <label class="row check"><input id="setAutoSave" type="checkbox"> Auto save after edits</label>
+        <label class="row check"><input id="setWordCompletion" type="checkbox"> Word completion from this file (Notepad++ style)</label>
+        <label class="row">Complete from <input id="setWordCompletionMin" type="number" min="1" max="8" step="1"> characters</label>
         <label class="row check"><input id="setRestoreSession" type="checkbox"> Reopen last file and folder on startup</label>
         <label class="row check"><input id="setWrap" type="checkbox"> Wrap long lines</label>
         <label class="row check"><input id="setBracketColor" type="checkbox"> Colour brackets by depth</label>

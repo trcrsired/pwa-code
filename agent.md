@@ -73,6 +73,12 @@ filesystem header is opt-in and is not linked into it.
 - Keyword lists are generated from Notepad++ defaults; `throws` and
   `return_failure` are added to C++.
 - Bracket colouring follows VSCode depth colours (`t-b0..t-b2`), toggleable.
+- Word completion follows Notepad++: the current file records every
+  letters/digits/underscore run of two or more characters, and typing a prefix
+  (from the configured minimum, default 1) opens a caret hint list.  Up/Down
+  move, Tab/Enter accept, Esc dismisses, clicking/tapping selects, and
+  `Ctrl+Space` forces the list.  It is enabled by default and configurable in
+  Settings; the word list is rebuilt off the typing path.
 - Find/replace is literal.  It works in the open file or, from the explorer's
   folder menu (or `Ctrl+Shift+F`), across that folder with VSCode-style results
   grouped by file.  Replace one/all edits open buffers in memory and rewrites

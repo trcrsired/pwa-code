@@ -27,6 +27,8 @@ const DEFAULT_SETTINGS = {
   autoSave: false,
   wrap: false,
   bracketColor: true,
+  wordCompletion: true,
+  wordCompletionMin: 1,
   conflictDisplay: true,
   restoreSession: true,
   encoding: 0,
@@ -61,6 +63,16 @@ const state = {
   wrapOffsets: null,
   wrapWidth: 0,
   wrapDirty: true,
+  wordSet: null,
+  wordSetText: "",
+  wordSetTimer: 0,
+  completionOpen: false,
+  completionItems: [],
+  completionIndex: -1,
+  completionStart: 0,
+  completionPrefix: "",
+  acceptingCompletion: false,
+  suppressCompletion: false,
   largeMode: false,
   largeFirst: 0,
   largeScaled: false,
@@ -229,6 +241,7 @@ function applySettings() {
   if (kb) kb.hidden = !s.softKeyboard;
   document.body.classList.toggle("softkb", !!s.softKeyboard);
   if (kb && !kb.hidden) positionSoftKeyboard();
+  if (s.wordCompletion === false) closeCompletion();
   const editor = $("editor");
   editor.wrap = s.wrap ? "soft" : "off";
   const wrapBtn = $("statusWrap");
@@ -671,6 +684,7 @@ function adoptLoadedDocument(tab, info, options) {
 
 async function applyTabData(tab) {
   const token = ++state.tabToken;
+  resetWordCompletion();
   if (state.hexMode) closeHex();
   if (tab.large) {
     const bytes = tab.bytes || await state.volumes.get(tab.volume).read(tab.path);
@@ -1545,6 +1559,7 @@ function syncEditorToEngine() {
 }
 
 function setEditorText(text) {
+  resetWordCompletion();
   const editor = $("editor");
   editor.value = text;
   state.prevText = text;
@@ -3626,6 +3641,244 @@ function isWordChar(ch) {
   return !!ch && /[A-Za-z0-9_]/.test(ch);
 }
 
+/* ------------------------------------------------- Notepad++ word completion */
+
+// Words come from the current file, exactly like Notepad++: every run of
+// letters/digits/underscore at least two characters long, including numbers.
+// The list is rebuilt off the typing path (debounced) so a large document does
+// not rescan on every keystroke; switching files drops the stale list.
+const COMPLETION_LIMIT = 12;
+const WORD_SCAN = /[A-Za-z0-9_]+/g;
+
+function resetWordCompletion() {
+  if (state.wordSetTimer) {
+    clearTimeout(state.wordSetTimer);
+    state.wordSetTimer = 0;
+  }
+  state.wordSet = null;
+  state.wordSetText = "";
+  closeCompletion();
+}
+
+function closeCompletion() {
+  state.completionOpen = false;
+  state.completionItems = [];
+  state.completionIndex = -1;
+  state.completionStart = 0;
+  state.completionPrefix = "";
+  const popup = $("completion");
+  if (popup) {
+    popup.hidden = true;
+    popup.textContent = "";
+  }
+}
+
+function rebuildWordSet() {
+  const editor = $("editor");
+  const set = new Set();
+  if (!state.largeMode && !state.hexMode) {
+    const text = editor.value;
+    WORD_SCAN.lastIndex = 0;
+    let match;
+    while ((match = WORD_SCAN.exec(text))) {
+      if (match[0].length >= 2) set.add(match[0]);
+    }
+    state.wordSetText = text;
+  } else {
+    state.wordSetText = "";
+  }
+  state.wordSet = set;
+}
+
+function scheduleWordSetRefresh() {
+  if (state.settings.wordCompletion === false) return;
+  if (state.wordSetTimer) clearTimeout(state.wordSetTimer);
+  state.wordSetTimer = setTimeout(() => {
+    state.wordSetTimer = 0;
+    rebuildWordSet();
+  }, 250);
+}
+
+function wordCompletionPrefix() {
+  const editor = $("editor");
+  if (state.largeMode || state.hexMode) return null;
+  if (editor.selectionStart !== editor.selectionEnd) return null;
+  const text = editor.value;
+  const caret = editor.selectionStart;
+  // Completing in the middle of an existing word would duplicate its tail.
+  if (caret < text.length && isWordChar(text[caret])) return null;
+  let start = caret;
+  while (start > 0 && isWordChar(text[start - 1])) start--;
+  const prefix = text.slice(start, caret);
+  return prefix ? { start, prefix, caret } : null;
+}
+
+function refreshCompletion(force = false) {
+  if (state.suppressCompletion || state.acceptingCompletion ||
+      state.settings.wordCompletion === false || state.largeMode || state.hexMode ||
+      !state.engineReady) {
+    closeCompletion();
+    return false;
+  }
+  const editor = $("editor");
+  if (document.activeElement !== editor) {
+    closeCompletion();
+    return false;
+  }
+  const info = wordCompletionPrefix();
+  if (!info) {
+    closeCompletion();
+    return false;
+  }
+  const minimum = force
+    ? 1
+    : Math.max(1, Math.min(8, Number(state.settings.wordCompletionMin) || 1));
+  if (info.prefix.length < minimum) {
+    closeCompletion();
+    return false;
+  }
+  if (!state.wordSet) rebuildWordSet();
+  const needle = info.prefix.toLowerCase();
+  const candidates = [];
+  for (const word of state.wordSet || []) {
+    if (word.length <= info.prefix.length) continue;
+    if (!word.toLowerCase().startsWith(needle)) continue;
+    candidates.push(word);
+  }
+  if (!candidates.length) {
+    closeCompletion();
+    return false;
+  }
+  const exactCase = (word) => (word.startsWith(info.prefix) ? 0 : 1);
+  candidates.sort((a, b) =>
+    exactCase(a) - exactCase(b) ||
+    a.length - b.length ||
+    a.localeCompare(b));
+  const previous = state.completionOpen
+    ? state.completionItems[state.completionIndex]
+    : "";
+  state.completionItems = candidates.slice(0, COMPLETION_LIMIT);
+  state.completionIndex = Math.max(0, state.completionItems.indexOf(previous));
+  state.completionStart = info.start;
+  state.completionPrefix = info.prefix;
+  state.completionOpen = true;
+  renderCompletion();
+  return true;
+}
+
+function renderCompletion() {
+  const popup = $("completion");
+  if (!popup || !state.completionOpen) {
+    closeCompletion();
+    return;
+  }
+  popup.textContent = "";
+  state.completionItems.forEach((word, index) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "completion-item" + (index === state.completionIndex ? " active" : "");
+    item.tabIndex = -1;
+    item.dataset.index = String(index);
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(index === state.completionIndex));
+    item.title = word;
+    item.textContent = word;
+    popup.appendChild(item);
+  });
+  popup.hidden = false;
+  positionCompletion(popup);
+  scrollCompletionIntoView(popup);
+}
+
+function completionMirror() {
+  let mirror = $("completionMirror");
+  if (!mirror) {
+    mirror = document.createElement("div");
+    mirror.id = "completionMirror";
+    mirror.className = "completion-mirror";
+    mirror.setAttribute("aria-hidden", "true");
+    $("viewport").appendChild(mirror);
+  }
+  return mirror;
+}
+
+// The textarea cannot report a caret rectangle, so mirror the text before the
+// caret with the same font, padding, tab size and wrap width and measure a
+// zero-width marker.  This also handles wrapped rows and horizontal scrolling.
+function positionCompletion(popup) {
+  const editor = $("editor");
+  const viewport = $("viewport");
+  const style = getComputedStyle(editor);
+  const mirror = completionMirror();
+  const wrap = !!state.settings.wrap && !state.largeMode;
+  mirror.style.width = wrap ? `${editorInnerWidth(editor)}px` : "max-content";
+  mirror.style.whiteSpace = wrap ? "pre-wrap" : "pre";
+  mirror.style.overflowWrap = wrap ? "anywhere" : "normal";
+  mirror.style.fontFamily = style.fontFamily;
+  mirror.style.fontSize = style.fontSize;
+  mirror.style.fontWeight = style.fontWeight;
+  mirror.style.lineHeight = style.lineHeight;
+  mirror.style.letterSpacing = style.letterSpacing;
+  mirror.style.tabSize = style.tabSize;
+  mirror.textContent = editor.value.slice(0, editor.selectionStart);
+  const marker = document.createElement("span");
+  marker.textContent = "\u200b";
+  mirror.appendChild(marker);
+
+  const editorRect = editor.getBoundingClientRect();
+  const viewportRect = viewport.getBoundingClientRect();
+  const mirrorRect = mirror.getBoundingClientRect();
+  const markerRect = marker.getBoundingClientRect();
+  const lineHeight = parseFloat(style.lineHeight) || state.settings.lineHeight;
+  const caretX = editorRect.left - viewportRect.left +
+    (markerRect.left - mirrorRect.left) - editor.scrollLeft;
+  const caretTop = editorRect.top - viewportRect.top +
+    (markerRect.top - mirrorRect.top) - editor.scrollTop;
+  const width = popup.offsetWidth;
+  const height = popup.offsetHeight;
+  const maxX = Math.max(4, viewport.clientWidth - width - 4);
+  const maxY = Math.max(4, viewport.clientHeight - height - 4);
+  let x = Math.max(4, Math.min(caretX, maxX));
+  let y = caretTop + lineHeight;
+  if (y > maxY && caretTop - height - 2 >= 4) y = caretTop - height - 2;
+  y = Math.max(4, Math.min(y, maxY));
+  popup.style.left = `${Math.round(x)}px`;
+  popup.style.top = `${Math.round(y)}px`;
+}
+
+function scrollCompletionIntoView(popup) {
+  const active = popup.querySelector(".completion-item.active");
+  if (!active) return;
+  if (active.offsetTop < popup.scrollTop) {
+    popup.scrollTop = active.offsetTop;
+  } else if (active.offsetTop + active.offsetHeight > popup.scrollTop + popup.clientHeight) {
+    popup.scrollTop = active.offsetTop + active.offsetHeight - popup.clientHeight;
+  }
+}
+
+function moveCompletion(delta) {
+  if (!state.completionOpen || !state.completionItems.length) return false;
+  const count = state.completionItems.length;
+  state.completionIndex = (state.completionIndex + delta + count) % count;
+  renderCompletion();
+  return true;
+}
+
+function acceptCompletion() {
+  if (!state.completionOpen) return false;
+  const word = state.completionItems[state.completionIndex];
+  if (!word) return false;
+  const editor = $("editor");
+  const caret = editor.selectionStart;
+  const start = Math.min(state.completionStart, caret);
+  closeCompletion();
+  state.acceptingCompletion = true;
+  editor.setRangeText(word, start, caret, "end");
+  editor.dispatchEvent(new Event("input"));
+  state.acceptingCompletion = false;
+  return true;
+}
+
 // Literal search only.  The regex toggle will arrive later; keeping this
 // routine free of RegExp also means characters like . * ( ) need no escaping.
 function findMatches(text, needle) {
@@ -4411,6 +4664,8 @@ function populateSettingsForm() {
     autoIndent.textContent = `Auto (detected: ${state.docIndent === 1 ? "Tab" : "2 spaces"})`;
   }
   $("setAutoSave").checked = s.autoSave;
+  $("setWordCompletion").checked = s.wordCompletion !== false;
+  $("setWordCompletionMin").value = String(Number(s.wordCompletionMin) || 1);
   $("setBracketColor").checked = s.bracketColor;
   $("setConflictDisplay").checked = s.conflictDisplay !== false;
   $("setRestoreSession").checked = s.restoreSession !== false;
@@ -4446,6 +4701,8 @@ async function applySettingsForm() {
   if (!Number.isFinite(s.indent)) s.indent = -1;
   s.indentExplicit = s.indent !== -1;
   s.autoSave = $("setAutoSave").checked;
+  s.wordCompletion = $("setWordCompletion").checked;
+  s.wordCompletionMin = Math.max(1, Math.min(8, Number($("setWordCompletionMin").value) || 1));
   s.bracketColor = $("setBracketColor").checked;
   s.conflictDisplay = $("setConflictDisplay").checked;
   s.restoreSession = $("setRestoreSession").checked;
@@ -4915,16 +5172,35 @@ function bindEvents() {
   const editor = $("editor");
   const rerender = () => updateHighlight();
 
-  editor.addEventListener("input", () => {
+  editor.addEventListener("input", (event) => {
     syncEditorToEngine();
     updateDirty(true);
     state.wrapDirty = true;
     refreshBracketMatch(false);
     rerender();
+    if (!event.isComposing) {
+      scheduleWordSetRefresh();
+      refreshCompletion();
+    }
     if (state.settings.autoSave && state.path) {
       clearTimeout(state.autoSaveTimer);
       state.autoSaveTimer = setTimeout(() => saveDocument(false), 900);
     }
+  });
+  // Clicking a suggestion must not blur the textarea (that would dismiss the
+  // OS keyboard); insert it and keep typing in place.
+  $("completion").addEventListener("pointerdown", (event) => event.preventDefault());
+  $("completion").addEventListener("click", (event) => {
+    const item = event.target.closest(".completion-item");
+    if (!item) return;
+    event.preventDefault();
+    state.completionIndex = Number(item.dataset.index) || 0;
+    acceptCompletion();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.completionOpen) return;
+    if ($("completion").contains(event.target) || event.target === editor) return;
+    closeCompletion();
   });
   // Some browsers copy soft-wrapped rows as hard line breaks.  Always take
   // the exact logical selection from the buffer instead of the rendered text.
@@ -4945,11 +5221,45 @@ function bindEvents() {
   editor.addEventListener("scroll", rerender, { passive: true });
   $("largeScroll").addEventListener("scroll", () => updateHighlight(), { passive: true });
   editor.addEventListener("keyup", () => { refreshBracketMatch(); updateStatus(); });
-  editor.addEventListener("click", () => { refreshBracketMatch(); updateStatus(); });
+  editor.addEventListener("click", () => { closeCompletion(); refreshBracketMatch(); updateStatus(); });
   editor.addEventListener("select", () => { refreshBracketMatch(); updateStatus(); });
   editor.addEventListener("selectionchange", () => { refreshBracketMatch(); updateStatus(); });
 
   editor.addEventListener("keydown", (event) => {
+    // The completion list owns navigation/accept/cancel while it is open.
+    if (state.completionOpen) {
+      if (event.key === "ArrowDown" || event.key === "PageDown") {
+        event.preventDefault();
+        moveCompletion(1);
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "PageUp") {
+        event.preventDefault();
+        moveCompletion(-1);
+        return;
+      }
+      if ((event.key === "Tab" && !event.shiftKey) ||
+          (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey)) {
+        event.preventDefault();
+        acceptCompletion();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeCompletion();
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight" ||
+          event.key === "Home" || event.key === "End") {
+        closeCompletion();
+      }
+    }
+    // Notepad++'s manual word completion shortcut.
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key === " ") {
+      event.preventDefault();
+      refreshCompletion(true);
+      return;
+    }
     if (!event.isComposing && state.settings.wrap &&
         !event.altKey && !event.ctrlKey && !event.metaKey &&
         (event.key === "ArrowUp" || event.key === "ArrowDown")) {

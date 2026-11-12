@@ -734,6 +734,65 @@ body.large-mode .highlight .lc { white-space: pre; overflow-wrap: normal; }
   color: transparent;
   -webkit-text-fill-color: transparent;
 }
+
+/* Notepad++-style word completion.  It floats over the editor next to the
+ * caret and is deliberately above the textarea but below find/modals. */
+.completion {
+  position: absolute;
+  z-index: 6;
+  min-width: 120px;
+  max-width: min(360px, 82vw);
+  max-height: 220px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  font-family: var(--mono);
+  font-size: var(--font-size);
+  line-height: 1.35;
+}
+.completion[hidden] { display: none; }
+.completion-item {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: calc(var(--radius) - 1px);
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.completion-item.active,
+.completion-item:hover { background: var(--active); }
+.completion-mirror {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: -1;
+  box-sizing: border-box;
+  padding: 0 var(--pad-x);
+  white-space: pre;
+  font-family: var(--mono);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  letter-spacing: 0;
+  tab-size: 4;
+}
+@media (max-width: 720px) {
+  .completion { max-height: 34vh; font-size: 15px; }
+  .completion-item { padding: 8px 10px; }
+}
 .editor::-webkit-scrollbar { width: 11px; height: 11px; }
 .editor::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; }
 .editor::-webkit-scrollbar-track { background: transparent; }
