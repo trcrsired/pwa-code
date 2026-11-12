@@ -998,8 +998,9 @@ void *open_pipe_client(char16_t const *name, ::std::uint_least32_t access) throw
 	return client;
 }
 
-void spawn_pty(terminal_process &proc) throws
+void spawn_pty(fi::u8string_view workspace, terminal_process &proc) throws
 {
+	(void)workspace;
 	conpty_api const api{load_conpty_api()};
 
 	// A per-process counter keeps repeated terminals from reusing a pipe name.
@@ -1148,7 +1149,8 @@ void resize_pty(terminal_process &proc, ::std::uint_least16_t cols,
 
 #else
 
-void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
+void spawn_pty(fi::u8string_view shell, fi::u8string_view workspace,
+			   terminal_process &proc) throws
 {
 	int master{::posix_openpt(O_RDWR | O_NOCTTY | (pty_nonblocking ? O_NONBLOCK : 0))};
 	if (master < 0)
@@ -1208,6 +1210,13 @@ void spawn_pty(fi::u8string_view shell, terminal_process &proc) throws
 			}
 		}
 		char *argv[]{const_cast<char *>(reinterpret_cast<char const *>(shell.data())), nullptr};
+		// Build macros use workspace-relative paths, so the shell must start
+		// where the file API stores them.  -w can point outside the server's
+		// own working directory.
+		if (!workspace.is_empty())
+		{
+			(void)::chdir(reinterpret_cast<char const *>(workspace.data()));
+		}
 		::execvp(argv[0], argv);
 		::_exit(127);
 	}
@@ -1413,7 +1422,8 @@ void terminal_scrollback_append(terminal_session *session, ::std::byte const *da
 }
 
 terminal_session *create_terminal_session(fi::u8string_view id, bool persistent,
-										  fi::u8string_view shell) throws
+										  fi::u8string_view shell,
+										  fi::u8string_view workspace) throws
 {
 	auto *session{new terminal_session{}};
 	try
@@ -1424,10 +1434,9 @@ terminal_session *create_terminal_session(fi::u8string_view id, bool persistent,
 		}
 		session->persistent = persistent;
 #if defined(_WIN32)
-		(void)shell;
-		spawn_pty(session->proc);
+		spawn_pty(workspace, session->proc);
 #else
-		spawn_pty(shell, session->proc);
+		spawn_pty(shell, workspace, session->proc);
 #endif
 	}
 	catch throws(::std::error e)
@@ -1465,7 +1474,8 @@ fi::io_async_task<> send_session_scrollback(Sched sched, auto sock_io,
 
 template <typename Sched>
 fi::io_async_task<> ws_terminal(Sched sched, fi::u8iobuf_socket_file &sock,
-								request const &req, fi::u8string_view query) throws
+								request const &req, fi::u8string_view query,
+								fi::u8string_view workspace) throws
 {
 	purge_terminal_sessions();
 	auto const requested_id{query_value(query, u8"session")};
@@ -1496,7 +1506,8 @@ fi::io_async_task<> ws_terminal(Sched sched, fi::u8iobuf_socket_file &sock,
 		}
 #endif
 		session = create_terminal_session(requested_id, persistent,
-										  fi::u8string_view{shell.data(), shell.size()});
+										  fi::u8string_view{shell.data(), shell.size()},
+										  workspace);
 	}
 
 	session->attached = true;
@@ -1785,7 +1796,8 @@ fi::io_async_task<> session(Sched sched, fi::u8iobuf_socket_file sock,
 			if (is_ws)
 			{
 				co_await ws_terminal(sched, sock, req,
-									 fi::u8string_view{parts.query.data(), parts.query.size()});
+									 fi::u8string_view{parts.query.data(), parts.query.size()},
+									 fi::u8string_view{cfg.workspace.data(), cfg.workspace.size()});
 				co_return;
 			}
 			if (req.method == fi::u8string_view{u8"OPTIONS"})

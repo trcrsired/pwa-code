@@ -1356,6 +1356,29 @@ body.term-resizing { user-select: none; cursor: row-resize; }
 .modal-body .row input[type="url"], .modal-body .row input[type="text"] {
   width: min(230px, 55%);
 }
+.modal-body .row.stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.modal-body .row textarea {
+  width: 100%;
+  min-height: 62px;
+  resize: vertical;
+  background: var(--panel);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 5px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.mount-help code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+}
 .modal-body .row.check { justify-content: flex-start; gap: 8px; }
 .modal-foot {
   display: flex;

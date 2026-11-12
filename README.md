@@ -22,13 +22,18 @@ shipped as an installable PWA, plus an async native coding server.
 - **Editing** — Notepad++ keyword sets (36 languages), VSCode-style bracket
   depth colours, Notepad++-style word completion (records words from the
   current file and shows a caret hint list accepted with Tab/Enter),
-  find/replace, find/replace across a folder with grouped
-  VSCode-style results and replace one/all, go to line, hex editor, extra-key
-  row (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's on-screen
-  keyboard.
+  Notepad++-style build macros (`Ctrl+Shift+B` saves the current file and runs
+  a configurable command with `$(FULL_CURRENT_PATH)`, `$(CURRENT_DIRECTORY)`,
+  `$(FILE_NAME)`, `$(NAME_PART)` and `$(EXT_PART)` placeholders in the
+  server-backed terminal), find/replace, find/replace across a folder with
+  grouped VSCode-style results and replace one/all, go to line, hex editor,
+  extra-key row (Esc/Tab/Ctrl/Alt/arrows) that also raises the device's
+  on-screen keyboard.
 - **Themes** — full-black dark or full-white light; the default follows the
   OS colour scheme and repaints live when it changes.
-- **Terminal** — native async PTY over WebSocket.
+- **Terminal** — native async PTY over WebSocket.  The POSIX shell starts in
+  the server workspace so build-macro paths resolve against the same files the
+  remote volume exposes.
 - **Errors** — herbceptions only (`throws` / `catch throws (::std::error e)`);
   no errno-style status returns.  Native builds use `-fno-exceptions -fno-rtti
   -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-ident`.

@@ -29,6 +29,11 @@ const DEFAULT_SETTINGS = {
   bracketColor: true,
   wordCompletion: true,
   wordCompletionMin: 1,
+  // Notepad++-style run command.  The default compiles and runs a C++ file;
+  // every $(...) placeholder is expanded from the active document first.
+  buildCommand:
+    'cd "$(CURRENT_DIRECTORY)" && c++ -std=c++20 -O2 -o "$(NAME_PART)" ' +
+    '"$(FILE_NAME)" && ./"$(NAME_PART)"',
   conflictDisplay: true,
   restoreSession: true,
   encoding: 0,
@@ -2340,7 +2345,7 @@ async function newFolder() {
 
 /* ------------------------------------------------------------------ save */
 
-async function saveDocument(saveAs = false) {
+async function saveDocument(saveAs = false, quiet = false) {
   if (!state.engineReady) return;
   if (state.largeMode) {
     toast("Large files open in the read-only partial view; edit them with the native CLI.", true);
@@ -2379,11 +2384,88 @@ async function saveDocument(saveAs = false) {
     updateDocPath();
     renderTabs();
     scheduleBackupSave();
-    toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
+    if (!quiet) toast(`saved ${state.path} • ${formatBytes(bytes.length)}`);
     await refreshFiles();
   } catch (error) {
     fail("save", error);
   }
+}
+
+/* ------------------------------------------------------------- build macro */
+
+// Notepad++-style run command placeholders.  Paths are relative to the
+// pwa-code server workspace, which is also where the PTY shell starts.
+function buildMacroParts(path) {
+  const file = baseName(path);
+  const dot = file.lastIndexOf(".");
+  return {
+    FULL_CURRENT_PATH: path,
+    CURRENT_DIRECTORY: parentPath(path) || ".",
+    FILE_NAME: file,
+    NAME_PART: dot > 0 ? file.slice(0, dot) : file,
+    EXT_PART: dot > 0 ? file.slice(dot + 1) : "",
+  };
+}
+
+function expandBuildMacro(template, path) {
+  const parts = buildMacroParts(path);
+  return String(template).replace(/\$\((FULL_CURRENT_PATH|CURRENT_DIRECTORY|FILE_NAME|NAME_PART|EXT_PART)\)/g,
+    (match, key) => (Object.prototype.hasOwnProperty.call(parts, key) ? parts[key] : match));
+}
+
+function buildMacroVolume() {
+  try {
+    const volume = state.volumes.get(state.volume);
+    // A static HTTP mount has no PTY and no writable workspace, so a build
+    // command could neither save the file nor run against it.
+    if (volume && volume.kind === "http" && volume.mode !== "http") return volume;
+  } catch {
+    /* unmounted volume */
+  }
+  return null;
+}
+
+async function runBuildMacro() {
+  if (!state.engineReady) return;
+  if (state.largeMode) {
+    toast("Large files open in the read-only partial view; use the native CLI.", true);
+    return;
+  }
+  if (!buildMacroVolume()) {
+    toast("Build macro needs a remote mount served by pwa-code.", true);
+    return;
+  }
+  if (!state.path) {
+    await saveDocument(false, true);
+    if (!state.path) return;
+  }
+  const template = String(state.settings.buildCommand || "").trim();
+  if (!template) {
+    toast("Set a build command in Settings.", true);
+    return;
+  }
+  // Compile what is on screen, not the previous save.  A failed save leaves
+  // the document dirty, so stop rather than build stale bytes.
+  if (state.dirty) {
+    await saveDocument(false, true);
+    if (state.dirty) return;
+  }
+  const command = expandBuildMacro(template, state.path);
+  toggleTerminal(true);
+  ensureTerminalInstances();
+  let inst = activeTermInst();
+  if (!inst) {
+    toast("Could not open the terminal.", true);
+    return;
+  }
+  // If the visible terminal belongs to another server, give the build its own
+  // shell instead of typing the command into the wrong machine.
+  const target = terminalUrl(inst);
+  if (inst.url && terminalTargetKey(inst.url) !== terminalTargetKey(target)) {
+    inst = newTerminalInstance();
+  }
+  sendTerminalBytes(new TextEncoder().encode(`${command}\r`));
+  toast(`build: ${baseName(state.path)}`);
 }
 
 /* ------------------------------------------------------------------ close */
@@ -2615,6 +2697,7 @@ function createTerminalInstance(options = {}) {
     el,
     term: null,
     ws: null,
+    url: "",
     queue: [],
     replay: options.replay !== false,
     retry: 0,
@@ -2704,20 +2787,32 @@ function updateTerminalStatus(inst = activeTermInst()) {
   $("termStatus").textContent = inst ? (inst.status || "disconnected") : "disconnected";
 }
 
+function terminalTargetKey(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete("replay");
+    return parsed.toString();
+  } catch {
+    return String(url);
+  }
+}
+
 function terminalUrl(inst) {
   let base = "";
   if (state.settings.termUrl) {
     base = state.settings.termUrl;
-  } else if (state.volumes.current === "remote") {
+  } else {
     // A remote mount of the pwa-code server family also carries the PTY
-    // terminal, so "connect" targets the machine whose files are open.
+    // terminal, so "connect" targets the machine whose files are open.  The
+    // active tab's volume, not the sidebar tab, decides this: a build macro
+    // must not run on another mount just because the explorer moved.
     let volume = null;
     try {
-      volume = state.volumes.get(state.volumes.ref());
+      volume = state.volumes.get(state.volume);
     } catch {
       volume = null;
     }
-    if (volume && volume.server && volume.base) {
+    if (volume && volume.kind === "http" && volume.mode !== "http" && volume.base) {
       try {
         const url = new URL(volume.base);
         url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -2778,6 +2873,7 @@ function connectTerminal(inst = activeTermInst()) {
     try { old.close(); } catch { /* already closed */ }
   }
   const url = terminalUrl(inst);
+  inst.url = url;
   inst.status = "connecting…";
   updateTerminalStatus(inst);
   try {
@@ -4666,6 +4762,7 @@ function populateSettingsForm() {
   $("setAutoSave").checked = s.autoSave;
   $("setWordCompletion").checked = s.wordCompletion !== false;
   $("setWordCompletionMin").value = String(Number(s.wordCompletionMin) || 1);
+  $("setBuildCommand").value = s.buildCommand || "";
   $("setBracketColor").checked = s.bracketColor;
   $("setConflictDisplay").checked = s.conflictDisplay !== false;
   $("setRestoreSession").checked = s.restoreSession !== false;
@@ -4703,6 +4800,7 @@ async function applySettingsForm() {
   s.autoSave = $("setAutoSave").checked;
   s.wordCompletion = $("setWordCompletion").checked;
   s.wordCompletionMin = Math.max(1, Math.min(8, Number($("setWordCompletionMin").value) || 1));
+  s.buildCommand = $("setBuildCommand").value;
   s.bracketColor = $("setBracketColor").checked;
   s.conflictDisplay = $("setConflictDisplay").checked;
   s.restoreSession = $("setRestoreSession").checked;
@@ -5554,6 +5652,7 @@ function bindEvents() {
   $("redoBtn").addEventListener("click", redo);
   $("saveBtn").addEventListener("click", () => saveDocument(false));
   $("saveAsBtn").addEventListener("click", () => saveDocument(true));
+  $("buildBtn").addEventListener("click", () => runBuildMacro());
   $("findBtn").addEventListener("click", () => openFind(false));
   $("hexBtn").addEventListener("click", () => (state.hexMode ? closeHex() : openHex()));
   $("hexClose").addEventListener("click", closeHex);
@@ -6051,6 +6150,18 @@ function bindEvents() {
   window.addEventListener(
     "keydown",
     (event) => {
+      // Ctrl+Shift+B is the Notepad++-style run/build shortcut.  Capture it so
+      // the browser's bookmark-bar toggle never sees it.
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.shiftKey &&
+        !event.altKey &&
+        (event.key === "b" || event.key === "B")
+      ) {
+        event.preventDefault();
+        runBuildMacro();
+        return;
+      }
       const closeChord =
         (event.ctrlKey || event.metaKey) &&
         !event.altKey &&
